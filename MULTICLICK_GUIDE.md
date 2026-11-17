@@ -26,6 +26,14 @@ Windows Flutter 빌드는 시간이 걸리고 대형 네이티브 종속성을 �
 소스 적용, 컴파일 또는 테스트에 실패한다면 Actions의 실패 로그를 확인하세요.
 실제 원격 화면에서의 멀티클릭 동작은 별도로 검증해야 합니다.
 
+### 현재 CI 빌드 구성
+
+FFmpeg 하드웨어 코덱 헤더를 찾지 못하는 Windows 빌드 오류를 피하기 위해
+현재 GitHub Actions에서는 `--hwcodec` 옵션을 사용하지 않습니다.
+소프트웨어 코덱 기반으로 먼저 실행파일을 생성하며, 하드웨어 가속 관련 기능은
+일부 제한될 수 있습니다. GitHub Actions의 **Windows x64 ZIP** 단계가 성공하고
+Artifacts가 올라온 경우에만 실행파일 빌드 성공으로 판단하세요.
+
 원본: https://github.com/rustdesk/rustdesk
 공식 빌드 설명: https://rustdesk.com/docs/en/dev/build/
 원본 프로젝트의 라이선스 표기를 유지합니다.
