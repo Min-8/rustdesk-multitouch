@@ -196,7 +196,29 @@ jobs:
       - name: Install native dependencies
         shell: bash
         run: |
-          "$VCPKG_ROOT/vcpkg" install --triplet x64-windows-static
+          set -euo pipefail
+          # RustDesk's native crates (including magnum-opus) resolve
+          # VCPKG_ROOT/installed/<triplet>, not vcpkg's manifest default
+          # <repo>/vcpkg_installed/<triplet>.
+          "$VCPKG_ROOT/vcpkg" install \
+            --triplet x64-windows-static \
+            --x-install-root="$VCPKG_ROOT/installed"
+
+      - name: Verify native dependencies are in expected directory
+        shell: pwsh
+        run: |
+          $root = Join-Path $env:VCPKG_ROOT "installed\x64-windows-static"
+          $header = Join-Path $root "include\opus\opus_multistream.h"
+          $library = Join-Path $root "lib\opus.lib"
+          Write-Host "VCPKG_ROOT: $env:VCPKG_ROOT"
+          Write-Host "Checking Opus header: $header"
+          if (!(Test-Path -LiteralPath $header)) {
+            throw "Opus header was not installed in the location expected by magnum-opus: $header"
+          }
+          if (!(Test-Path -LiteralPath $library)) {
+            throw "Opus library was not installed in the location expected by magnum-opus: $library"
+          }
+          Write-Host "Opus static library and headers verified."
 
       - name: Build RustDesk Windows Flutter application
         shell: pwsh
