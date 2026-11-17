@@ -1,0 +1,152 @@
+name: Multi-click Windows build
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/multiclick-build.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  sync-upstream:
+    name: Import pinned RustDesk and apply multi-click
+    runs-on: ubuntu-22.04
+    timeout-minutes: 45
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout custom repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: true
+
+      - name: Import upstream into this repository (first run only)
+        shell: bash
+        env:
+          UPSTREAM_SHA: 54416dcaa127d209f2cfbdc4b08235bae78ccfe6
+        run: |
+          set -euo pipefail
+          if test -f src/flutter_ffi.rs; then
+            echo "RustDesk source already exists; skipping import."
+            test -f flutter/lib/desktop/pages/remote_page.dart
+            grep -q MOUSE_BROADCAST_SOURCE src/flutter_ffi.rs
+            exit 0
+          fi
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git remote add upstream https://github.com/rustdesk/rustdesk.git
+          git fetch --depth 1 upstream "$UPSTREAM_SHA"
+          git merge --allow-unrelated-histories --no-ff --no-commit FETCH_HEAD
+
+          # Do not import the original project's many unrelated CI workflows.
+          # Keep this repository's single opt-in Windows workflow.
+          find .github/workflows -maxdepth 1 -type f ! -name 'multiclick-build.yml' -delete
+          git add -A .github/workflows
+
+          python3 scripts/apply_multiclick.py .
+          git diff --check
+          git add -A
+          git commit -m "Import RustDesk $UPSTREAM_SHA and add opt-in multi-click"
+          git push origin HEAD:main
+
+  build-windows:
+    name: Build Windows x64 ZIP
+    needs: sync-upstream
+    runs-on: windows-2022
+    timeout-minutes: 360
+    permissions:
+      contents: read
+    env:
+      VCPKG_ROOT: 'C:\vcpkg'
+      VCPKG_BINARY_SOURCES: clear
+      VCPKG_DEFAULT_TRIPLET: x64-windows-static
+
+    steps:
+      - name: Checkout imported RustDesk source
+        uses: actions/checkout@v4
+        with:
+          ref: main
+          fetch-depth: 1
+          submodules: recursive
+
+      - name: Verify patch is in imported sources
+        shell: pwsh
+        run: |
+          if (!(Test-Path src/flutter_ffi.rs)) { throw "Upstream source not imported" }
+          if (!(Select-String -Path src/flutter_ffi.rs -Pattern 'MOUSE_BROADCAST_SOURCE' -Quiet)) {
+            throw "Multi-click patch not applied"
+          }
+
+      - name: Install LLVM 15
+        uses: KyleMayes/install-llvm-action@v2
+        with:
+          version: '15.0.6'
+
+      - name: Install Flutter 3.24.5
+        uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          flutter-version: '3.24.5'
+          architecture: x64
+
+      - name: Prepare RustDesk custom Flutter engine
+        shell: pwsh
+        run: |
+          flutter doctor -v
+          flutter precache --windows
+          $flutterRoot = Split-Path (Split-Path (Get-Command flutter).Source -Parent) -Parent
+          Write-Host "Flutter root: $flutterRoot"
+          Invoke-WebRequest -Uri "https://github.com/rustdesk/engine/releases/download/main/windows-x64-release.zip" -OutFile "windows-x64-release.zip"
+          Expand-Archive -Path "windows-x64-release.zip" -DestinationPath "engine-unpacked"
+          Copy-Item -Path "engine-unpacked\*" -Destination "$flutterRoot\bin\cache\artifacts\engine\windows-x64-release\" -Recurse -Force
+          Copy-Item ".github\patches\flutter_3.24.4_dropdown_menu_enableFilter.diff" "$flutterRoot\dropdown.patch"
+          Push-Location $flutterRoot
+          git apply dropdown.patch
+          Pop-Location
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: '1.75'
+          targets: x86_64-pc-windows-msvc
+          components: rustfmt
+
+      - name: Cache Rust compilation
+        uses: Swatinem/rust-cache@v2
+
+      - name: Set up vcpkg
+        uses: lukka/run-vcpkg@v11
+        with:
+          vcpkgDirectory: 'C:\vcpkg'
+          vcpkgGitCommitId: '9e593bb18ea69cc5095e012465dcd675a822ed0d'
+          doNotCache: true
+
+      - name: Install native dependencies
+        shell: bash
+        run: |
+          "$VCPKG_ROOT/vcpkg" install --triplet x64-windows-static
+
+      - name: Build RustDesk Windows Flutter application
+        shell: pwsh
+        run: |
+          python .\build.py --portable --flutter --skip-portable-pack --hwcodec
+
+      - name: Check compiled program
+        shell: pwsh
+        run: |
+          if (!(Test-Path "flutter\build\windows\x64\runner\Release\rustdesk.exe")) {
+            throw "RustDesk executable not found"
+          }
+
+      - name: Upload complete Windows build folder
+        uses: actions/upload-artifact@v4
+        with:
+          name: rustdesk-multiclick-windows-x64
+          path: flutter/build/windows/x64/runner/Release/
+          if-no-files-found: error
+          retention-days: 14
