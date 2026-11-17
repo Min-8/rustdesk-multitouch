@@ -201,7 +201,9 @@ jobs:
       - name: Build RustDesk Windows Flutter application
         shell: pwsh
         run: |
-          python .\build.py --portable --flutter --skip-portable-pack --hwcodec
+          # No --hwcodec: avoid the FFmpeg headers required by optional hardware encoding.
+          # Multi-click only needs the default software codec stack.
+          python .\build.py --portable --flutter --skip-portable-pack
 
       - name: Check compiled program
         shell: pwsh
