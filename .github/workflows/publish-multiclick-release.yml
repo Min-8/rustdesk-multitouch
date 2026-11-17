@@ -1,0 +1,112 @@
+name: Publish MultiClick Windows preview release
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/publish-multiclick-release.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  actions: read
+
+concurrency:
+  group: rustdesk-multiclick-preview-1
+  cancel-in-progress: false
+
+jobs:
+  release:
+    name: Verify successful build and publish Windows ZIP
+    runs-on: ubuntu-22.04
+    timeout-minutes: 30
+    env:
+      GH_TOKEN: ${{ github.token }}
+      BUILD_RUN_ID: '44106529738'
+      BUILD_SHA: 'efeca3cf74c39cee73bb5413c56bd03a087dc8b1'
+      TAG_NAME: 'v1.5.3-multiclick-preview.1'
+      ASSET_NAME: 'RustDesk-MultiClick-Windows-x64.zip'
+
+    steps:
+      - name: Verify build provenance and success
+        shell: bash
+        run: |
+          set -euo pipefail
+          actual_sha="$(gh run view "$BUILD_RUN_ID" --repo "$GITHUB_REPOSITORY" --json headSha --jq .headSha)"
+          conclusion="$(gh run view "$BUILD_RUN_ID" --repo "$GITHUB_REPOSITORY" --json conclusion --jq .conclusion)"
+          echo "Build run: $BUILD_RUN_ID"
+          echo "Build SHA: $actual_sha"
+          echo "Conclusion: $conclusion"
+          test "$conclusion" = "success"
+          test "$actual_sha" = "$BUILD_SHA"
+
+      - name: Download verified Windows build
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p payload
+          gh run download "$BUILD_RUN_ID" --repo "$GITHUB_REPOSITORY" \
+            --name rustdesk-multiclick-windows-x64 --dir payload
+          echo "Downloaded files:"
+          find payload -maxdepth 3 -type f | head -50
+          test -n "$(find payload -type f -iname rustdesk.exe -print -quit)"
+
+      - name: Package Windows application and checksum
+        shell: bash
+        run: |
+          set -euo pipefail
+          (cd payload && zip -q -r "../$ASSET_NAME" .)
+          test -s "$ASSET_NAME"
+          sha256sum "$ASSET_NAME" > SHA256SUMS.txt
+          ls -lh "$ASSET_NAME" SHA256SUMS.txt
+          cat SHA256SUMS.txt
+
+      - name: Write release notes
+        shell: bash
+        run: |
+          cat > RELEASE_NOTES.md <<'EOF'
+          ## RustDesk MultiClick - Windows x64 preview
+
+          **Unofficial, unsigned preview build.** Windows x64, RustDesk 1.5.3 source-based.
+
+          - Toggle **멀티클릭 ON/OFF** from the remote session screen; OFF by default on restart.
+          - Sends absolute mouse movement and left/right button presses/releases from the selected source RustDesk session to other connected remote RustDesk sessions.
+          - Does **not** broadcast to multiple local game windows. Keyboard, wheel, touch, and relative-mouse input are not broadcast.
+          - Built without optional `--hwcodec` acceleration. Hardware codec performance may differ from the official release.
+          - Not yet verified by an end-to-end remote-control functionality test.
+
+          **Install:** Download `RustDesk-MultiClick-Windows-x64.zip`, extract **all** files to a separate folder, and run `rustdesk.exe`. Do not overwrite an existing official RustDesk installation.
+
+          **Source corresponding to this binary:** [Build commit](https://github.com/Min-8/rustdesk-multitouch/tree/efeca3cf74c39cee73bb5413c56bd03a087dc8b1)
+
+          **Successful GitHub Actions run:** [#44106529738](https://github.com/Min-8/rustdesk-multitouch/actions/runs/44106529738)
+
+          The archive includes the application and its required supporting DLL/resource files. SHA256SUMS.txt gives the archive checksum.
+          EOF
+
+      - name: Create preview release with verified build archive
+        shell: bash
+        run: |
+          set -euo pipefail
+          if gh release view "$TAG_NAME" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            echo "Release already exists. Updating binary assets."
+            gh release upload "$TAG_NAME" "$ASSET_NAME" SHA256SUMS.txt \
+              --repo "$GITHUB_REPOSITORY" --clobber
+          else
+            gh release create "$TAG_NAME" "$ASSET_NAME" SHA256SUMS.txt \
+              --repo "$GITHUB_REPOSITORY" \
+              --target "$BUILD_SHA" \
+              --title "RustDesk MultiClick Windows x64 (Preview 1)" \
+              --notes-file RELEASE_NOTES.md \
+              --prerelease
+          fi
+
+      - name: Verify published release assets
+        shell: bash
+        run: |
+          set -euo pipefail
+          gh release view "$TAG_NAME" --repo "$GITHUB_REPOSITORY" \
+            --json url,tagName,isPrerelease,assets --jq '{url, tagName, isPrerelease, assets: [.assets[].name]}'
+          actual="$(gh release view "$TAG_NAME" --repo "$GITHUB_REPOSITORY" --json assets --jq '.assets[].name')"
+          grep -Fxq "$ASSET_NAME" <<< "$actual"
+          grep -Fxq 'SHA256SUMS.txt' <<< "$actual"
