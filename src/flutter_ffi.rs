@@ -1316,13 +1316,10 @@ pub fn main_set_env(key: String, value: Option<String>) -> SyncReturn<()> {
 
 pub fn main_set_local_option(key: String, value: String) {
     if key == "mouse-broadcast-source" {
-        let next = uuid::Uuid::parse_str(&value).ok();
-        let mut source = MOUSE_BROADCAST_SOURCE.lock().unwrap();
-        if *source != next {
-            // Switching or disabling the source must never keep targets armed.
-            MOUSE_BROADCAST_TARGETS.lock().unwrap().clear();
-        }
-        *source = next;
+        // OFF only disarms broadcasting; retain target IDs for the next ON.
+        // Reopening the picker restores the user's previous selections.
+        *MOUSE_BROADCAST_SOURCE.lock().unwrap() =
+            uuid::Uuid::parse_str(&value).ok();
         return;
     }
     if key == "mouse-broadcast-targets" {
@@ -1333,15 +1330,13 @@ pub fn main_set_local_option(key: String, value: String) {
                 return;
             }
         };
-        // Only connected default remote-control peers can be selected.
-        let connected: HashSet<String> = sessions::get_sessions()
-            .into_iter()
-            .filter(|s| s.is_default() &&
-                s.connection_round_state.lock().unwrap().is_connected())
-            .map(|s| s.lc.read().unwrap().get_id().to_owned())
-            .collect();
+        // Preserve selections if a remote device temporarily disconnects.
+        // Dispatch still checks the target is actually connected before sending.
         *MOUSE_BROADCAST_TARGETS.lock().unwrap() = requested
-            .into_iter().filter(|id| connected.contains(id)).collect();
+            .into_iter()
+            .filter(|id| !id.trim().is_empty() && id.len() <= 256)
+            .take(512)
+            .collect();
         return;
     }
     let is_texture_render_key = key.eq(keys::OPTION_TEXTURE_RENDER);

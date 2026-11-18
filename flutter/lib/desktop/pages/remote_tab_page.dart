@@ -615,15 +615,20 @@ class _MouseBroadcastTitleButtonState
       if (remote == null) return const SizedBox.shrink();
       final active = remote.isMouseBroadcastSource;
       return Tooltip(
-        message: active ? '멀티클릭 ON · 대상 기기 변경' : '멀티클릭 대상 선택',
+        message: active ? '멀티클릭 ON · 클릭하면 OFF' : '멀티클릭 OFF · 대상 선택',
         child: IconButton(
           icon: Icon(Icons.mouse,
-              size: 18, color: active ? Colors.deepOrange : null),
+              size: 18, color: active ? Colors.red : null),
           splashRadius: 18,
           padding: EdgeInsets.zero,
           constraints: const BoxConstraints(minWidth: 34, minHeight: 28),
           onPressed: () async {
-            await remote.showMouseBroadcastTargetPicker();
+            if (active) {
+              // One click disarms, but Rust retains the chosen target IDs.
+              remote.stopMouseBroadcast();
+            } else {
+              await remote.showMouseBroadcastTargetPicker();
+            }
             if (mounted) setState(() {});
           },
         ),

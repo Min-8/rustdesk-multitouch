@@ -176,7 +176,20 @@ jobs:
           if (!( (Get-Content -Raw -LiteralPath 'flutter/lib/desktop/pages/remote_tab_page.dart').Contains('_MouseBroadcastTitleButton') )) {
             throw "Missing titlebar multi-click button"
           }
-          Write-Host "Verified titlebar control, target selection and resolution scaling."
+          if (!( (Get-Content -Raw -LiteralPath 'flutter/lib/desktop/pages/remote_tab_page.dart').Contains('remote.stopMouseBroadcast()') )) {
+            throw "Missing one-click OFF behavior"
+          }
+          $picker = Get-Content -Raw -LiteralPath 'flutter/lib/desktop/pages/remote_page.dart'
+          foreach ($check in @('PointerDeviceKind.mouse', 'mainGetPeerOptionSync', 'scrollController', '입력을 받을 원격 기기를 선택하세요.')) {
+            if (!($picker.Contains($check))) {
+              throw "Missing improved multi-click picker functionality: $check"
+            }
+          }
+          $core = Get-Content -Raw -LiteralPath 'src/flutter_ffi.rs'
+          if (!($core.Contains('OFF only disarms broadcasting; retain target IDs'))) {
+            throw "Missing selection preservation when turning multi-click OFF"
+          }
+          Write-Host "Verified one-click OFF, target retention, alias labels, and draggable scroll list."
 
       - name: Install LLVM 15
         uses: KyleMayes/install-llvm-action@v2
@@ -281,7 +294,7 @@ jobs:
       actions: read
     env:
       GH_TOKEN: ${{ github.token }}
-      TAG_NAME: v1.5.3-multiclick-preview.4
+      TAG_NAME: v1.5.3-multiclick-preview.5
       ASSET_NAME: RustDesk-MultiClick-Windows-x64.zip
 
     steps:
@@ -311,30 +324,35 @@ jobs:
         shell: bash
         run: |
           cat > RELEASE_NOTES.md <<'EOF'
-          ## RustDesk MultiClick Windows x64 — preview 4
+          ## RustDesk MultiClick Windows x64 — preview 5
 
-          **Updated title bar:** One small multi-click mouse icon is placed to
-          the left of New Connection / minimize / maximize / close. The two
-          large overlay buttons have been removed from the remote game image.
-          Click the icon to choose or modify the connected target devices.
-          Choose zero devices and apply to turn broadcasting off.
+          **One-button workflow**
+          - OFF mouse icon: open the target selection dialog.
+          - Choose multiple connected target devices and Apply: icon turns red (ON).
+          - ON red mouse icon: click once to turn OFF without clearing the device selection.
+          - Next OFF click opens the dialog with the previous target list selected.
 
-          **Different resolutions:** Mouse movement is mapped by normalized
-          (proportional) display coordinates, including screen origin. Source
-          and target images can have different pixel resolutions; clicking
-          stays aligned by relative screen position. Click down/up uses the
-          already-synchronized target cursor position as in RustDesk.
-          A differing screen aspect ratio or app layout can still cause the
-          same *content* to appear in different positions.
+          **Improved device picker**
+          - Shorter Korean dialog title and description.
+          - Compact checkbox rows and smaller Select All / Clear All controls.
+          - Scroll a long list with the mouse wheel, visible scrollbar,
+            or press-and-drag the list with the mouse like a touchscreen.
+          - Saved device aliases are shown before the numeric RustDesk ID.
+          - Temporarily disconnected previously selected peers are retained
+            and shown as offline when reopening the dialog.
+          - Several target checkboxes can be active simultaneously.
 
-          - Windows x64; unofficial, unsigned build based on RustDesk 1.5.3
-          - In-memory selection; resets when disabled or restarted
-          - No hardware-codec feature (--hwcodec)
-          - Does not broadcast keyboard, wheel, relative mouse or touch input
-          - CI verifies compilation only; behavior needs testing on devices
+          **Retained from preview 4**
+          - Compact mouse icon in the window titlebar; no game-screen overlay.
+          - Proportional mouse-position scaling for different remote resolutions.
 
-          **Usage:** Extract all ZIP files to a separate folder and run
-          rustdesk.exe. Do not overwrite an official RustDesk installation.
+          Windows x64 unofficial unsigned preview, RustDesk 1.5.3-based.
+          Hardware-codec feature is disabled. Keyboard, wheel, relative-mouse,
+          and touch input are not broadcast. Runtime remote-device testing
+          remains necessary beyond CI compilation.
+
+          Extract the entire ZIP to a separate folder and run rustdesk.exe.
+          Do not overwrite your existing official RustDesk installation.
           EOF
 
       - name: Upload new preview release
@@ -348,7 +366,7 @@ jobs:
           gh release create "$TAG_NAME" "$ASSET_NAME" SHA256SUMS.txt \
             --repo "$GITHUB_REPOSITORY" \
             --target "$GITHUB_SHA" \
-            --title "RustDesk MultiClick Windows x64 — Preview 4 (compact titlebar & resolution scaling)" \
+            --title "RustDesk MultiClick Windows x64 — Preview 5 (retained target selection & compact list)" \
             --notes-file RELEASE_NOTES.md \
             --prerelease
 

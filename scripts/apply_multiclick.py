@@ -848,4 +848,452 @@ class _MouseBroadcastTitleButtonState
 
 /// A widget that displays a hint in the tab bar when relative mouse mode is active.""")
 
-print("Patched RustDesk with compact multi-click title button and normalized screen coordinates")
+replace_once(rust,
+    """    if key == "mouse-broadcast-source" {
+        let next = uuid::Uuid::parse_str(&value).ok();
+        let mut source = MOUSE_BROADCAST_SOURCE.lock().unwrap();
+        if *source != next {
+            // Switching or disabling the source must never keep targets armed.
+            MOUSE_BROADCAST_TARGETS.lock().unwrap().clear();
+        }
+        *source = next;
+        return;
+    }""",
+    """    if key == "mouse-broadcast-source" {
+        // OFF only disarms broadcasting; retain target IDs for the next ON.
+        // Reopening the picker restores the user's previous selections.
+        *MOUSE_BROADCAST_SOURCE.lock().unwrap() =
+            uuid::Uuid::parse_str(&value).ok();
+        return;
+    }""")
+
+replace_once(rust,
+    """        // Only connected default remote-control peers can be selected.
+        let connected: HashSet<String> = sessions::get_sessions()
+            .into_iter()
+            .filter(|s| s.is_default() &&
+                s.connection_round_state.lock().unwrap().is_connected())
+            .map(|s| s.lc.read().unwrap().get_id().to_owned())
+            .collect();
+        *MOUSE_BROADCAST_TARGETS.lock().unwrap() = requested
+            .into_iter().filter(|id| connected.contains(id)).collect();""",
+    """        // Preserve selections if a remote device temporarily disconnects.
+        // Dispatch still checks the target is actually connected before sending.
+        *MOUSE_BROADCAST_TARGETS.lock().unwrap() = requested
+            .into_iter()
+            .filter(|id| !id.trim().is_empty() && id.len() <= 256)
+            .take(512)
+            .collect();""")
+
+replace_once(dart,
+    """import 'dart:convert';
+""",
+    """import 'dart:convert';
+import 'package:flutter/gestures.dart';
+""")
+
+replace_once(dart,
+    """  bool get isMouseBroadcastSource {
+    final state = _lastState.value;
+    if (state is! _RemotePageState || !state.mounted) return false;
+    return bind.mainGetLocalOption(key: 'mouse-broadcast-source') ==
+        state.sessionId.toString();
+  }""",
+    """  bool get isMouseBroadcastSource {
+    final state = _lastState.value;
+    if (state is! _RemotePageState || !state.mounted) return false;
+    return bind.mainGetLocalOption(key: 'mouse-broadcast-source') ==
+        state.sessionId.toString();
+  }
+
+  /// Stop sending input without losing any selected remote device IDs.
+  void stopMouseBroadcast() {
+    if (isMouseBroadcastSource) {
+      bind.mainSetLocalOption(key: 'mouse-broadcast-source', value: '');
+    }
+  }""")
+
+replace_once(dart,
+    """  Future<void> _showMouseBroadcastTargetsDialog() async {
+    if (!mounted) return;
+    final peers = _getMouseBroadcastPeers();
+    final isCurrentSource =
+        bind.mainGetLocalOption(key: _mouseBroadcastKey) ==
+            sessionId.toString();
+    final selected = isCurrentSource
+        ? _getSelectedMouseBroadcastTargets().intersection(peers.toSet())
+        : <String>{};
+
+    await showDialog<void>(
+      context: context,
+      builder: (dialogContext) => StatefulBuilder(
+        builder: (context, setDialogState) => AlertDialog(
+          title: const Row(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Icon(Icons.devices, size: 22),
+              SizedBox(width: 10),
+              Text('멀티클릭 대상 선택'),
+            ],
+          ),
+          content: SizedBox(
+            width: 440,
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                const Text('기준 창에서 조작할 때 입력을 받을 원격 기기를 선택하세요.'),
+                const SizedBox(height: 8),
+                Text(
+                  '연결된 대상 ${peers.length}대 · 선택 ${selected.length}대',
+                  style: Theme.of(context).textTheme.bodySmall,
+                ),
+                Row(
+                  children: [
+                    TextButton(
+                      onPressed: peers.isEmpty ? null : () =>
+                          setDialogState(() => selected.addAll(peers)),
+                      child: const Text('전체 선택'),
+                    ),
+                    TextButton(
+                      onPressed: selected.isEmpty ? null : () =>
+                          setDialogState(selected.clear),
+                      child: const Text('전체 해제'),
+                    ),
+                    const Spacer(),
+                    IconButton(
+                      icon: const Icon(Icons.refresh),
+                      tooltip: '연결된 기기 새로고침',
+                      onPressed: () => setDialogState(() {
+                        final refreshed = _getMouseBroadcastPeers();
+                        peers..clear()..addAll(refreshed);
+                        selected.removeWhere((id) => !peers.contains(id));
+                      }),
+                    ),
+                  ],
+                ),
+                const Divider(height: 12),
+                ConstrainedBox(
+                  constraints: const BoxConstraints(maxHeight: 290),
+                  child: peers.isEmpty
+                      ? const Padding(
+                          padding: EdgeInsets.symmetric(vertical: 24),
+                          child: Text(
+                            '연결된 다른 원격 기기가 없습니다.\n'
+                            '다른 RustDesk 원격창을 연결한 다음 새로고침하세요.',
+                            textAlign: TextAlign.center,
+                          ),
+                        )
+                      : ListView.builder(
+                          shrinkWrap: true,
+                          itemCount: peers.length,
+                          itemBuilder: (context, index) {
+                            final peer = peers[index];
+                            return CheckboxListTile(
+                              dense: true,
+                              controlAffinity:
+                                  ListTileControlAffinity.leading,
+                              secondary:
+                                  const Icon(Icons.desktop_windows_outlined),
+                              title: Text(peer,
+                                  overflow: TextOverflow.ellipsis),
+                              subtitle: const Text('연결됨'),
+                              value: selected.contains(peer),
+                              onChanged: (checked) => setDialogState(() {
+                                if (checked == true) {
+                                  selected.add(peer);
+                                } else {
+                                  selected.remove(peer);
+                                }
+                              }),
+                            );
+                          },
+                        ),
+                ),
+                const SizedBox(height: 10),
+                const Text('선택한 기기에만 이동·좌/우 클릭을 전송합니다. '
+                    '0대 선택 시 멀티클릭은 꺼집니다.'),
+              ],
+            ),
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.of(dialogContext).pop(),
+              child: const Text('취소'),
+            ),
+            FilledButton(
+              onPressed: () {
+                final enabled = selected.isNotEmpty;
+                // Arm source first: changing source clears the previous targets.
+                bind.mainSetLocalOption(
+                    key: _mouseBroadcastKey,
+                    value: enabled ? sessionId.toString() : '');
+                bind.mainSetLocalOption(
+                    key: _mouseBroadcastTargetsKey,
+                    value: jsonEncode(selected.toList()));
+                Navigator.of(dialogContext).pop();
+              },
+              child: Text(selected.isEmpty
+                  ? '멀티클릭 끄기'
+                  : '적용 (${selected.length}대)'),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+""",
+    """  Future<void> _showMouseBroadcastTargetsDialog() async {
+    if (!mounted) return;
+    // Remember selections independently from whether broadcasting is ON.
+    final connected = _getMouseBroadcastPeers().toSet();
+    final selected = _getSelectedMouseBroadcastTargets();
+    // Show previously selected offline devices too, so they are never lost.
+    final peers = <String>{...connected, ...selected}.toList()..sort();
+    final scrollController = ScrollController();
+
+    void togglePeer(String peer, StateSetter update) {
+      update(() {
+        if (!selected.add(peer)) selected.remove(peer);
+      });
+    }
+
+    try {
+      await showDialog<void>(
+        context: context,
+        builder: (dialogContext) => StatefulBuilder(
+          builder: (context, setDialogState) {
+            final theme = Theme.of(context);
+            final smallButtonStyle = TextButton.styleFrom(
+              padding: const EdgeInsets.symmetric(horizontal: 6),
+              minimumSize: const Size(0, 28),
+              tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+              textStyle: const TextStyle(fontSize: 12),
+            );
+            return AlertDialog(
+              title: const Text('멀티클릭'),
+              titlePadding: const EdgeInsets.fromLTRB(20, 16, 20, 8),
+              contentPadding: const EdgeInsets.symmetric(horizontal: 20),
+              actionsPadding: const EdgeInsets.fromLTRB(12, 4, 12, 10),
+              content: SizedBox(
+                width: 390,
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    const Text('입력을 받을 원격 기기를 선택하세요.',
+                        style: TextStyle(fontSize: 13)),
+                    const SizedBox(height: 4),
+                    Text('연결 ${connected.length}대 · 선택 ${selected.length}대',
+                        style: theme.textTheme.bodySmall),
+                    Row(
+                      children: [
+                        TextButton(
+                          style: smallButtonStyle,
+                          onPressed: connected.isEmpty
+                              ? null
+                              : () => setDialogState(() =>
+                                  selected.addAll(connected)),
+                          child: const Text('전체 선택'),
+                        ),
+                        TextButton(
+                          style: smallButtonStyle,
+                          onPressed: selected.isEmpty
+                              ? null
+                              : () => setDialogState(selected.clear),
+                          child: const Text('전체 해제'),
+                        ),
+                        const Spacer(),
+                        IconButton(
+                          icon: const Icon(Icons.refresh, size: 18),
+                          tooltip: '기기 목록 새로고침',
+                          padding: EdgeInsets.zero,
+                          constraints: const BoxConstraints(
+                              minWidth: 30, minHeight: 30),
+                          onPressed: () => setDialogState(() {
+                            connected
+                              ..clear()
+                              ..addAll(_getMouseBroadcastPeers());
+                            peers
+                              ..clear()
+                              ..addAll({...connected, ...selected});
+                            peers.sort();
+                          }),
+                        ),
+                      ],
+                    ),
+                    const Divider(height: 8),
+                    ConstrainedBox(
+                      constraints: const BoxConstraints(maxHeight: 300),
+                      child: peers.isEmpty
+                          ? const Padding(
+                              padding: EdgeInsets.symmetric(vertical: 18),
+                              child: Text('다른 원격 기기를 연결한 뒤 새로고침하세요.'),
+                            )
+                          : ScrollConfiguration(
+                              // Desktop Flutter defaults to wheel-only mouse
+                              // scrolling. Also allow press-and-drag on rows.
+                              behavior: const MaterialScrollBehavior().copyWith(
+                                dragDevices: {
+                                  PointerDeviceKind.mouse,
+                                  PointerDeviceKind.touch,
+                                  PointerDeviceKind.stylus,
+                                  PointerDeviceKind.trackpad,
+                                },
+                              ),
+                              child: Scrollbar(
+                                controller: scrollController,
+                                thumbVisibility: peers.length > 8,
+                                child: ListView.builder(
+                                  controller: scrollController,
+                                  shrinkWrap: true,
+                                  itemExtent: 36,
+                                  physics: const ClampingScrollPhysics(),
+                                  itemCount: peers.length,
+                                  itemBuilder: (context, index) {
+                                    final peer = peers[index];
+                                    final alias = bind.mainGetPeerOptionSync(
+                                            id: peer, key: 'alias')
+                                        .trim();
+                                    final online = connected.contains(peer);
+                                    final checked = selected.contains(peer);
+                                    return Material(
+                                      color: checked
+                                          ? theme.colorScheme.primary
+                                              .withOpacity(0.06)
+                                          : Colors.transparent,
+                                      child: InkWell(
+                                        onTap: () => togglePeer(
+                                            peer, setDialogState),
+                                        child: Row(
+                                          children: [
+                                            SizedBox(
+                                              width: 32,
+                                              child: Checkbox(
+                                                value: checked,
+                                                onChanged: (_) => togglePeer(
+                                                    peer, setDialogState),
+                                                materialTapTargetSize:
+                                                    MaterialTapTargetSize
+                                                        .shrinkWrap,
+                                                visualDensity:
+                                                    const VisualDensity(
+                                                  horizontal: -4,
+                                                  vertical: -4,
+                                                ),
+                                              ),
+                                            ),
+                                            const SizedBox(width: 6),
+                                            Expanded(
+                                              child: Text.rich(
+                                                TextSpan(
+                                                  children: [
+                                                    TextSpan(
+                                                      text: alias.isEmpty
+                                                          ? peer
+                                                          : alias,
+                                                      style: const TextStyle(
+                                                          fontWeight:
+                                                              FontWeight.w600),
+                                                    ),
+                                                    if (alias.isNotEmpty)
+                                                      TextSpan(
+                                                        text: '  ·  $peer',
+                                                        style: TextStyle(
+                                                          fontSize: 10,
+                                                          color: theme
+                                                              .colorScheme
+                                                              .onSurfaceVariant,
+                                                        ),
+                                                      ),
+                                                    if (!online)
+                                                      TextSpan(
+                                                        text: '  (오프라인)',
+                                                        style: TextStyle(
+                                                          fontSize: 10,
+                                                          color: theme
+                                                              .colorScheme
+                                                              .error,
+                                                        ),
+                                                      ),
+                                                  ],
+                                                ),
+                                                maxLines: 1,
+                                                overflow:
+                                                    TextOverflow.ellipsis,
+                                                style: const TextStyle(
+                                                    fontSize: 12),
+                                              ),
+                                            ),
+                                            const SizedBox(width: 6),
+                                          ],
+                                        ),
+                                      ),
+                                    );
+                                  },
+                                ),
+                              ),
+                            ),
+                    ),
+                  ],
+                ),
+              ),
+              actions: [
+                TextButton(
+                  onPressed: () => Navigator.of(dialogContext).pop(),
+                  child: const Text('취소'),
+                ),
+                FilledButton(
+                  onPressed: () {
+                    final targetList = selected.toList()..sort();
+                    bind.mainSetLocalOption(
+                        key: _mouseBroadcastTargetsKey,
+                        value: jsonEncode(targetList));
+                    bind.mainSetLocalOption(
+                        key: _mouseBroadcastKey,
+                        value: selected.isNotEmpty
+                            ? sessionId.toString()
+                            : '');
+                    Navigator.of(dialogContext).pop();
+                  },
+                  child: Text(selected.isEmpty
+                      ? '끄기'
+                      : '적용 (${selected.length}대)'),
+                ),
+              ],
+            );
+          },
+        ),
+      );
+    } finally {
+      scrollController.dispose();
+    }
+  }
+
+""")
+
+replace_once(remote_tab,
+    """        message: active ? '멀티클릭 ON · 대상 기기 변경' : '멀티클릭 대상 선택',""",
+    """        message: active ? '멀티클릭 ON · 클릭하면 OFF' : '멀티클릭 OFF · 대상 선택',""")
+
+replace_once(remote_tab,
+    """              size: 18, color: active ? Colors.deepOrange : null),""",
+    """              size: 18, color: active ? Colors.red : null),""")
+
+replace_once(remote_tab,
+    """          onPressed: () async {
+            await remote.showMouseBroadcastTargetPicker();
+            if (mounted) setState(() {});
+          },""",
+    """          onPressed: () async {
+            if (active) {
+              // One click disarms, but Rust retains the chosen target IDs.
+              remote.stopMouseBroadcast();
+            } else {
+              await remote.showMouseBroadcastTargetPicker();
+            }
+            if (mounted) setState(() {});
+          },""")
+
+print("Patched RustDesk with retained target selections, alias labels, and draggable compact list")
