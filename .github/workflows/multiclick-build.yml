@@ -167,8 +167,11 @@ jobs:
               throw "Missing selected-target routing in $path"
             }
           }
-          if (!( (Get-Content -Raw -LiteralPath 'flutter/lib/desktop/pages/remote_page.dart').Contains('멀티클릭 대상 선택') )) {
-            throw "Missing target selection UI"
+          $pickerSource = Get-Content -Raw -LiteralPath 'flutter/lib/desktop/pages/remote_page.dart'
+          if (!( $pickerSource.Contains("const Text('멀티클릭')") -and
+                  $pickerSource.Contains('입력을 받을 원격 기기를 선택하세요.') -and
+                  $pickerSource.Contains('selected.addAll(connected)') )) {
+            throw "Missing current compact multi-click target selection dialog"
           }
           if (!( (Get-Content -Raw -LiteralPath 'src/flutter_ffi.rs').Contains('mouse_broadcast_map_axis') )) {
             throw "Missing proportional coordinate transform"
