@@ -5,6 +5,8 @@ on:
     branches: [main]
     paths:
       - '.github/workflows/multiclick-build.yml'
+      - 'src/flutter_ffi.rs'
+      - 'scripts/apply_multiclick.py'
   workflow_dispatch:
 
 permissions:
@@ -148,6 +150,16 @@ jobs:
           if (!(Select-String -Path src/flutter_ffi.rs -Pattern 'MOUSE_BROADCAST_SOURCE' -Quiet)) {
             throw "Multi-click patch not applied"
           }
+          $fixedPredicate = 'let regular_move = m.get("type").map_or(true, |t| t.is_empty())'
+          foreach ($path in @('src/flutter_ffi.rs', 'scripts/apply_multiclick.py')) {
+            if (!( (Get-Content -Raw -LiteralPath $path).Contains($fixedPredicate) )) {
+              throw "Missing empty-type mouse movement fix in $path"
+            }
+          }
+          if (!(Select-String -Path flutter/lib/consts.dart -Pattern 'const String kMouseEventTypeDefault = "";' -SimpleMatch -Quiet)) {
+            throw "Expected Flutter's empty mouse movement type was not found"
+          }
+          Write-Host "Verified source, generator, and empty-type mouse movement fix."
 
       - name: Install LLVM 15
         uses: KyleMayes/install-llvm-action@v2
@@ -241,3 +253,86 @@ jobs:
           path: flutter/build/windows/x64/runner/Release/
           if-no-files-found: error
           retention-days: 14
+
+  publish-preview:
+    name: Publish patched Windows preview release
+    needs: [build-windows]
+    runs-on: ubuntu-22.04
+    timeout-minutes: 30
+    permissions:
+      contents: write
+      actions: read
+    env:
+      GH_TOKEN: \${{ github.token }}
+      TAG_NAME: v1.5.3-multiclick-preview.2
+      ASSET_NAME: RustDesk-MultiClick-Windows-x64.zip
+
+    steps:
+      - name: Download successful Windows build
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p payload
+          gh run download "$GITHUB_RUN_ID" --repo "$GITHUB_REPOSITORY" \
+            --name rustdesk-multiclick-windows-x64 --dir payload
+          exe="$(find payload -type f -iname rustdesk.exe -print -quit)"
+          if [ -z "$exe" ]; then
+            echo "::error::rustdesk.exe not found in successful Windows build artifact"
+            exit 1
+          fi
+          echo "Validated executable: $exe"
+
+      - name: Package full application and SHA256
+        shell: bash
+        run: |
+          set -euo pipefail
+          (cd payload && zip -q -r "../$ASSET_NAME" .)
+          sha256sum "$ASSET_NAME" > SHA256SUMS.txt
+          test -s "$ASSET_NAME"
+
+      - name: Prepare preview release notes
+        shell: bash
+        run: |
+          cat > RELEASE_NOTES.md <<'EOF'
+          ## RustDesk MultiClick Windows x64 — preview 2
+
+          **Fix:** Pointer movement events whose JSON type value is an empty string
+          are now broadcast. Previously, a click in session A could click at
+          session B's last known cursor location because the move was not forwarded.
+
+          Includes the same fix in scripts/apply_multiclick.py so regenerating the
+          patch from upstream does not revert it.
+
+          - Build: RustDesk 1.5.3, Windows x64, unofficial and unsigned
+          - No hardware-codec feature (--hwcodec)
+          - Mouse movement and left/right clicks only; no keyboard, wheel,
+            relative mouse mode, or multiple local game windows
+          - This build has passed CI compilation; multi-session behavior is not
+            yet independently verified in a live remote desktop test
+
+          **Usage:** Extract the ZIP completely to a separate folder and run
+          rustdesk.exe. Do not overwrite an official RustDesk installation.
+          EOF
+
+      - name: Upload new preview release
+        shell: bash
+        run: |
+          set -euo pipefail
+          if gh release view "$TAG_NAME" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            echo "Release tag already exists; keeping existing release unchanged."
+            exit 1
+          fi
+          gh release create "$TAG_NAME" "$ASSET_NAME" SHA256SUMS.txt \
+            --repo "$GITHUB_REPOSITORY" \
+            --target "$GITHUB_SHA" \
+            --title "RustDesk MultiClick Windows x64 — Preview 2 (cursor sync fix)" \
+            --notes-file RELEASE_NOTES.md \
+            --prerelease
+
+      - name: Verify published assets
+        shell: bash
+        run: |
+          set -euo pipefail
+          assets="$(gh release view "$TAG_NAME" --repo "$GITHUB_REPOSITORY" --json assets --jq '.assets[].name')"
+          grep -Fxq "$ASSET_NAME" <<< "$assets"
+          grep -Fxq SHA256SUMS.txt <<< "$assets"
