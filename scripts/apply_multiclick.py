@@ -58,7 +58,7 @@ pub fn session_restart_remote_device""",
             session.send_mouse(mask, x, y, alt, ctrl, shift, command);
 
             // Only absolute motion + left/right press/release. No wheel/relative/touch.
-            let regular_move = !m.contains_key("type")
+            let regular_move = m.get("type").map_or(true, |t| t.is_empty())
                 && m.contains_key("x") && m.contains_key("y");
             let click = matches!(m.get("type").map(String::as_str), Some("down") | Some("up"))
                 && matches!(m.get("buttons").map(String::as_str), Some("left") | Some("right"));
