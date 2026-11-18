@@ -26,7 +26,7 @@ use base::{
     fs,
 };
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     sync::{
         atomic::{AtomicI32, Ordering},
         Arc,
@@ -41,6 +41,9 @@ lazy_static::lazy_static! {
     // Opt-in single broadcaster. In-memory only; OFF after restarting.
     static ref MOUSE_BROADCAST_SOURCE: std::sync::Mutex<Option<SessionID>> =
         std::sync::Mutex::new(None);
+    // Explicitly selected connected remote IDs; no implicit broadcast-to-all.
+    static ref MOUSE_BROADCAST_TARGETS: std::sync::Mutex<HashSet<String>> =
+        std::sync::Mutex::new(HashSet::new());
 }
 
 fn initialize(app_dir: &str, custom_client_config: &str) {
@@ -1245,6 +1248,32 @@ pub fn main_get_local_option(key: String) -> SyncReturn<String> {
         let active = MOUSE_BROADCAST_SOURCE.lock().unwrap();
         return SyncReturn(active.as_ref().map(ToString::to_string).unwrap_or_default());
     }
+    if key == "mouse-broadcast-targets" {
+        let mut selected: Vec<String> = MOUSE_BROADCAST_TARGETS.lock().unwrap()
+            .iter().cloned().collect();
+        selected.sort();
+        return SyncReturn(serde_json::to_string(&selected).unwrap_or_else(|_| "[]".into()));
+    }
+    if let Some(source_uuid) = key.strip_prefix("mouse-broadcast-peers:") {
+        let source = uuid::Uuid::parse_str(source_uuid).ok()
+            .and_then(|id| sessions::get_session_by_session_id(&id));
+        let mut peers = Vec::new();
+        if let Some(source) = source {
+            for target in sessions::get_sessions() {
+                if !target.is_default() || Arc::ptr_eq(&source, &target) ||
+                    !target.connection_round_state.lock().unwrap().is_connected() {
+                    continue;
+                }
+                let peer_id = target.lc.read().unwrap().get_id().to_owned();
+                if !peer_id.is_empty() {
+                    peers.push(peer_id);
+                }
+            }
+        }
+        peers.sort();
+        peers.dedup();
+        return SyncReturn(serde_json::to_string(&peers).unwrap_or_else(|_| "[]".into()));
+    }
     SyncReturn(get_local_option(key))
 }
 
@@ -1287,7 +1316,32 @@ pub fn main_set_env(key: String, value: Option<String>) -> SyncReturn<()> {
 
 pub fn main_set_local_option(key: String, value: String) {
     if key == "mouse-broadcast-source" {
-        *MOUSE_BROADCAST_SOURCE.lock().unwrap() = uuid::Uuid::parse_str(&value).ok();
+        let next = uuid::Uuid::parse_str(&value).ok();
+        let mut source = MOUSE_BROADCAST_SOURCE.lock().unwrap();
+        if *source != next {
+            // Switching or disabling the source must never keep targets armed.
+            MOUSE_BROADCAST_TARGETS.lock().unwrap().clear();
+        }
+        *source = next;
+        return;
+    }
+    if key == "mouse-broadcast-targets" {
+        let requested = match serde_json::from_str::<Vec<String>>(&value) {
+            Ok(ids) => ids,
+            Err(_) => {
+                log::warn!("Ignoring malformed mouse-broadcast target selection");
+                return;
+            }
+        };
+        // Only connected default remote-control peers can be selected.
+        let connected: HashSet<String> = sessions::get_sessions()
+            .into_iter()
+            .filter(|s| s.is_default() &&
+                s.connection_round_state.lock().unwrap().is_connected())
+            .map(|s| s.lc.read().unwrap().get_id().to_owned())
+            .collect();
+        *MOUSE_BROADCAST_TARGETS.lock().unwrap() = requested
+            .into_iter().filter(|id| connected.contains(id)).collect();
         return;
     }
     let is_texture_render_key = key.eq(keys::OPTION_TEXTURE_RENDER);
@@ -2107,14 +2161,21 @@ pub fn session_send_mouse(session_id: SessionID, msg: String) {
                 && matches!(m.get("buttons").map(String::as_str), Some("left") | Some("right"));
             let armed = MOUSE_BROADCAST_SOURCE.lock().unwrap().as_ref() == Some(&session_id);
             if armed && m.get("relative_mouse_mode").is_none() && (regular_move || click) {
-                for target in sessions::get_sessions() {
-                    if !target.is_default() || Arc::ptr_eq(&session, &target) {
-                        continue;
+                let selected = MOUSE_BROADCAST_TARGETS.lock().unwrap().clone();
+                if !selected.is_empty() {
+                    for target in sessions::get_sessions() {
+                        if !target.is_default() || Arc::ptr_eq(&session, &target) {
+                            continue;
+                        }
+                        if !target.connection_round_state.lock().unwrap().is_connected() {
+                            continue;
+                        }
+                        let peer_id = target.lc.read().unwrap().get_id().to_owned();
+                        if !selected.contains(&peer_id) {
+                            continue;
+                        }
+                        target.send_mouse(mask, x, y, alt, ctrl, shift, command);
                     }
-                    if !target.connection_round_state.lock().unwrap().is_connected() {
-                        continue;
-                    }
-                    target.send_mouse(mask, x, y, alt, ctrl, shift, command);
                 }
             }
         }

@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:convert';
 
 import 'package:desktop_multi_window/desktop_multi_window.dart';
 import 'package:flutter/material.dart';
@@ -90,6 +91,7 @@ class _RemotePageState extends State<RemotePage>
         WidgetsBindingObserver,
         TickerProviderStateMixin {
   static const _mouseBroadcastKey = 'mouse-broadcast-source';
+  static const _mouseBroadcastTargetsKey = 'mouse-broadcast-targets';
   Timer? _mouseBroadcastTimer;
   bool _mouseBroadcastEnabled = false;
   Timer? _timer;
@@ -148,6 +150,169 @@ class _RemotePageState extends State<RemotePage>
     _showRemoteCursor = ShowRemoteCursorState.find(id);
     _keyboardEnabled = KeyboardEnabledState.find(id);
     _remoteCursorMoved = RemoteCursorMovedState.find(id);
+  }
+
+
+  /// Choose exactly which connected remote-control peers receive clicks.
+  /// The Rust backend owns the shared selection across RustDesk windows.
+  List<String> _getMouseBroadcastPeers() {
+    try {
+      final value = bind.mainGetLocalOption(
+          key: 'mouse-broadcast-peers:${sessionId.toString()}');
+      final decoded = jsonDecode(value);
+      if (decoded is List) {
+        return decoded.whereType<String>().toList()..sort();
+      }
+    } catch (e) {
+      debugPrint('Cannot list multi-click peers: $e');
+    }
+    return <String>[];
+  }
+
+  Set<String> _getSelectedMouseBroadcastTargets() {
+    try {
+      final value =
+          bind.mainGetLocalOption(key: _mouseBroadcastTargetsKey);
+      final decoded = jsonDecode(value);
+      if (decoded is List) {
+        return decoded.whereType<String>().toSet();
+      }
+    } catch (e) {
+      debugPrint('Cannot read multi-click targets: $e');
+    }
+    return <String>{};
+  }
+
+  Future<void> _showMouseBroadcastTargetsDialog() async {
+    if (!mounted) return;
+    final peers = _getMouseBroadcastPeers();
+    final isCurrentSource =
+        bind.mainGetLocalOption(key: _mouseBroadcastKey) ==
+            sessionId.toString();
+    final selected = isCurrentSource
+        ? _getSelectedMouseBroadcastTargets().intersection(peers.toSet())
+        : <String>{};
+
+    await showDialog<void>(
+      context: context,
+      builder: (dialogContext) => StatefulBuilder(
+        builder: (context, setDialogState) => AlertDialog(
+          title: const Row(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Icon(Icons.devices, size: 22),
+              SizedBox(width: 10),
+              Text('멀티클릭 대상 선택'),
+            ],
+          ),
+          content: SizedBox(
+            width: 440,
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                const Text('기준 창에서 조작할 때 입력을 받을 원격 기기를 선택하세요.'),
+                const SizedBox(height: 8),
+                Text(
+                  '연결된 대상 ${peers.length}대 · 선택 ${selected.length}대',
+                  style: Theme.of(context).textTheme.bodySmall,
+                ),
+                Row(
+                  children: [
+                    TextButton(
+                      onPressed: peers.isEmpty ? null : () =>
+                          setDialogState(() => selected.addAll(peers)),
+                      child: const Text('전체 선택'),
+                    ),
+                    TextButton(
+                      onPressed: selected.isEmpty ? null : () =>
+                          setDialogState(selected.clear),
+                      child: const Text('전체 해제'),
+                    ),
+                    const Spacer(),
+                    IconButton(
+                      icon: const Icon(Icons.refresh),
+                      tooltip: '연결된 기기 새로고침',
+                      onPressed: () => setDialogState(() {
+                        final refreshed = _getMouseBroadcastPeers();
+                        peers..clear()..addAll(refreshed);
+                        selected.removeWhere((id) => !peers.contains(id));
+                      }),
+                    ),
+                  ],
+                ),
+                const Divider(height: 12),
+                ConstrainedBox(
+                  constraints: const BoxConstraints(maxHeight: 290),
+                  child: peers.isEmpty
+                      ? const Padding(
+                          padding: EdgeInsets.symmetric(vertical: 24),
+                          child: Text(
+                            '연결된 다른 원격 기기가 없습니다.\n'
+                            '다른 RustDesk 원격창을 연결한 다음 새로고침하세요.',
+                            textAlign: TextAlign.center,
+                          ),
+                        )
+                      : ListView.builder(
+                          shrinkWrap: true,
+                          itemCount: peers.length,
+                          itemBuilder: (context, index) {
+                            final peer = peers[index];
+                            return CheckboxListTile(
+                              dense: true,
+                              controlAffinity:
+                                  ListTileControlAffinity.leading,
+                              secondary:
+                                  const Icon(Icons.desktop_windows_outlined),
+                              title: Text(peer,
+                                  overflow: TextOverflow.ellipsis),
+                              subtitle: const Text('연결됨'),
+                              value: selected.contains(peer),
+                              onChanged: (checked) => setDialogState(() {
+                                if (checked == true) {
+                                  selected.add(peer);
+                                } else {
+                                  selected.remove(peer);
+                                }
+                              }),
+                            );
+                          },
+                        ),
+                ),
+                const SizedBox(height: 10),
+                const Text('선택한 기기에만 이동·좌/우 클릭을 전송합니다. '
+                    '0대 선택 시 멀티클릭은 꺼집니다.'),
+              ],
+            ),
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.of(dialogContext).pop(),
+              child: const Text('취소'),
+            ),
+            FilledButton(
+              onPressed: () {
+                final enabled = selected.isNotEmpty;
+                // Arm source first: changing source clears the previous targets.
+                bind.mainSetLocalOption(
+                    key: _mouseBroadcastKey,
+                    value: enabled ? sessionId.toString() : '');
+                bind.mainSetLocalOption(
+                    key: _mouseBroadcastTargetsKey,
+                    value: jsonEncode(selected.toList()));
+                if (mounted) {
+                  setState(() => _mouseBroadcastEnabled = enabled);
+                }
+                Navigator.of(dialogContext).pop();
+              },
+              child: Text(selected.isEmpty
+                  ? '멀티클릭 끄기'
+                  : '적용 (${selected.length}대)'),
+            ),
+          ],
+        ),
+      ),
+    );
   }
 
   @override
@@ -818,30 +983,50 @@ class _RemotePageState extends State<RemotePage>
                 Positioned(
                   bottom: 12,
                   right: 12,
-                  child: Tooltip(
-                    message: 'Repeat clicks on other connected RustDesk remote sessions',
-                    child: FilledButton.icon(
-                      style: FilledButton.styleFrom(
-                        backgroundColor: _mouseBroadcastEnabled
-                            ? Colors.deepOrange : Colors.black87,
-                        foregroundColor: Colors.white,
-                        visualDensity: VisualDensity.compact,
-                      ),
-                      icon: const Icon(Icons.mouse, size: 18),
-                      label: Text(_mouseBroadcastEnabled
-                          ? '멀티클릭 ON' : '멀티클릭 OFF'),
-                      onPressed: () {
-                        final active = bind.mainGetLocalOption(
-                            key: _mouseBroadcastKey);
-                        final next = active == sessionId.toString()
-                            ? '' : sessionId.toString();
-                        bind.mainSetLocalOption(
-                            key: _mouseBroadcastKey, value: next);
-                        if (mounted) {
-                          setState(() => _mouseBroadcastEnabled =
-                              next == sessionId.toString());
-                        }
-                      },
+                  child: Material(
+                    color: Colors.transparent,
+                    child: Row(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        Tooltip(
+                          message: '멀티클릭 켜기 또는 끄기',
+                          child: FilledButton.icon(
+                            style: FilledButton.styleFrom(
+                              backgroundColor: _mouseBroadcastEnabled
+                                  ? Colors.deepOrange : Colors.black87,
+                              foregroundColor: Colors.white,
+                              visualDensity: VisualDensity.compact,
+                            ),
+                            icon: const Icon(Icons.mouse, size: 18),
+                            label: Text(_mouseBroadcastEnabled
+                                ? '멀티클릭 ON' : '멀티클릭 OFF'),
+                            onPressed: () {
+                              final active = bind.mainGetLocalOption(
+                                      key: _mouseBroadcastKey) ==
+                                  sessionId.toString();
+                              if (active) {
+                                bind.mainSetLocalOption(
+                                    key: _mouseBroadcastKey, value: '');
+                                if (mounted) {
+                                  setState(() =>
+                                      _mouseBroadcastEnabled = false);
+                                }
+                              } else {
+                                _showMouseBroadcastTargetsDialog();
+                              }
+                            },
+                          ),
+                        ),
+                        const SizedBox(width: 6),
+                        Tooltip(
+                          message: '멀티클릭 대상 선택',
+                          child: FilledButton.tonalIcon(
+                            onPressed: _showMouseBroadcastTargetsDialog,
+                            icon: const Icon(Icons.tune, size: 18),
+                            label: const Text('대상 선택'),
+                          ),
+                        ),
+                      ],
                     ),
                   ),
                 ),

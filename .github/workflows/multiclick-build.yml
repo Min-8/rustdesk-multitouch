@@ -7,6 +7,7 @@ on:
       - '.github/workflows/multiclick-build.yml'
       - 'src/flutter_ffi.rs'
       - 'scripts/apply_multiclick.py'
+      - 'flutter/lib/desktop/pages/remote_page.dart'
   workflow_dispatch:
 
 permissions:
@@ -159,7 +160,15 @@ jobs:
           if (!(Select-String -Path flutter/lib/consts.dart -Pattern 'const String kMouseEventTypeDefault = "";' -SimpleMatch -Quiet)) {
             throw "Expected Flutter's empty mouse movement type was not found"
           }
-          Write-Host "Verified source, generator, and empty-type mouse movement fix."
+          foreach ($path in @('src/flutter_ffi.rs', 'scripts/apply_multiclick.py')) {
+            if (!( (Get-Content -Raw -LiteralPath $path).Contains('MOUSE_BROADCAST_TARGETS') )) {
+              throw "Missing selected-target routing in $path"
+            }
+          }
+          if (!( (Get-Content -Raw -LiteralPath 'flutter/lib/desktop/pages/remote_page.dart').Contains('멀티클릭 대상 선택') )) {
+            throw "Missing target selection UI"
+          }
+          Write-Host "Verified multi-click target selection and empty-type mouse movement fix."
 
       - name: Install LLVM 15
         uses: KyleMayes/install-llvm-action@v2
@@ -264,7 +273,7 @@ jobs:
       actions: read
     env:
       GH_TOKEN: ${{ github.token }}
-      TAG_NAME: v1.5.3-multiclick-preview.2
+      TAG_NAME: v1.5.3-multiclick-preview.3
       ASSET_NAME: RustDesk-MultiClick-Windows-x64.zip
 
     steps:
@@ -294,23 +303,25 @@ jobs:
         shell: bash
         run: |
           cat > RELEASE_NOTES.md <<'EOF'
-          ## RustDesk MultiClick Windows x64 — preview 2
+          ## RustDesk MultiClick Windows x64 — preview 3
 
-          **Fix:** Pointer movement events whose JSON type value is an empty string
-          are now broadcast. Previously, a click in session A could click at
-          session B's last known cursor location because the move was not forwarded.
+          **New:** Click **대상 선택** in a remote-control window to open the
+          multi-click device-selection dialog. Select individual connected
+          remote RustDesk device IDs, or use Select All / Clear All / Refresh.
+          Only selected devices receive mouse movements and left/right clicks.
+          Zero selected devices means broadcasting OFF.
 
-          Includes the same fix in scripts/apply_multiclick.py so regenerating the
-          patch from upstream does not revert it.
+          **Fix retained:** Empty-type mouse movement events are forwarded,
+          keeping cursors synchronized when clicking.
 
-          - Build: RustDesk 1.5.3, Windows x64, unofficial and unsigned
+          - Windows x64; unofficial, unsigned build based on RustDesk 1.5.3
+          - In-memory selection; sources and selections reset when disabled or restarted
           - No hardware-codec feature (--hwcodec)
-          - Mouse movement and left/right clicks only; no keyboard, wheel,
-            relative mouse mode, or multiple local game windows
-          - This build has passed CI compilation; multi-session behavior is not
-            yet independently verified in a live remote desktop test
+          - Does not broadcast keyboard, wheel, relative mouse or touch input
+          - CI verifies successful compilation only; test behavior with two
+            connected remote computers before relying on the preview
 
-          **Usage:** Extract the ZIP completely to a separate folder and run
+          **Usage:** Extract all ZIP files to a separate folder and run
           rustdesk.exe. Do not overwrite an official RustDesk installation.
           EOF
 
@@ -325,7 +336,7 @@ jobs:
           gh release create "$TAG_NAME" "$ASSET_NAME" SHA256SUMS.txt \
             --repo "$GITHUB_REPOSITORY" \
             --target "$GITHUB_SHA" \
-            --title "RustDesk MultiClick Windows x64 — Preview 2 (cursor sync fix)" \
+            --title "RustDesk MultiClick Windows x64 — Preview 3 (select targets)" \
             --notes-file RELEASE_NOTES.md \
             --prerelease
 
