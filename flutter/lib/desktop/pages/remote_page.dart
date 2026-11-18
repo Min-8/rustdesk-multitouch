@@ -69,6 +69,21 @@ class RemotePage extends StatefulWidget {
 
   FFI get ffi => (_lastState.value! as _RemotePageState)._ffi;
 
+  /// Entry point for the compact multi-click control in the window title bar.
+  Future<void> showMouseBroadcastTargetPicker() async {
+    final state = _lastState.value;
+    if (state is _RemotePageState && state.mounted) {
+      await state._showMouseBroadcastTargetsDialog();
+    }
+  }
+
+  bool get isMouseBroadcastSource {
+    final state = _lastState.value;
+    if (state is! _RemotePageState || !state.mounted) return false;
+    return bind.mainGetLocalOption(key: 'mouse-broadcast-source') ==
+        state.sessionId.toString();
+  }
+
   void releaseMacOSInputForTabTransfer() {
     if (!isMacOS) return;
     // Release before removing the source tab. Its delayed disposal must not
@@ -92,8 +107,6 @@ class _RemotePageState extends State<RemotePage>
         TickerProviderStateMixin {
   static const _mouseBroadcastKey = 'mouse-broadcast-source';
   static const _mouseBroadcastTargetsKey = 'mouse-broadcast-targets';
-  Timer? _mouseBroadcastTimer;
-  bool _mouseBroadcastEnabled = false;
   Timer? _timer;
   String keyboardMode = "legacy";
   bool _isWindowBlur = false;
@@ -300,9 +313,6 @@ class _RemotePageState extends State<RemotePage>
                 bind.mainSetLocalOption(
                     key: _mouseBroadcastTargetsKey,
                     value: jsonEncode(selected.toList()));
-                if (mounted) {
-                  setState(() => _mouseBroadcastEnabled = enabled);
-                }
                 Navigator.of(dialogContext).pop();
               },
               child: Text(selected.isEmpty
@@ -319,17 +329,6 @@ class _RemotePageState extends State<RemotePage>
   void initState() {
     super.initState();
     _ffi = FFI(widget.sessionId);
-    if (isWindows) {
-      _mouseBroadcastTimer =
-          Timer.periodic(const Duration(milliseconds: 600), (_) {
-        if (!mounted) return;
-        final active = bind.mainGetLocalOption(key: _mouseBroadcastKey) ==
-            sessionId.toString();
-        if (active != _mouseBroadcastEnabled) {
-          setState(() => _mouseBroadcastEnabled = active);
-        }
-      });
-    }
     if (isMacOS) {
       // SchedulerBinding.instance.lifecycleState is null in the first connection in a new window.
       _macOSLifecycleState = SchedulerBinding.instance.lifecycleState;
@@ -832,7 +831,6 @@ class _RemotePageState extends State<RemotePage>
   @override
   Future<void> dispose() async {
     final closeSession = closeSessionOnDispose.remove(widget.id) ?? true;
-    _mouseBroadcastTimer?.cancel();
     if (isWindows &&
         closeSession &&
         bind.mainGetLocalOption(key: _mouseBroadcastKey) ==
@@ -979,57 +977,6 @@ class _RemotePageState extends State<RemotePage>
                         ])
                       : remoteToolbar(context)),
               _ffi.ffiModel.pi.isSet.isFalse ? emptyOverlay() : Offstage(),
-              if (isWindows && !_ffi.inputModel.relativeMouseMode.value)
-                Positioned(
-                  bottom: 12,
-                  right: 12,
-                  child: Material(
-                    color: Colors.transparent,
-                    child: Row(
-                      mainAxisSize: MainAxisSize.min,
-                      children: [
-                        Tooltip(
-                          message: '멀티클릭 켜기 또는 끄기',
-                          child: FilledButton.icon(
-                            style: FilledButton.styleFrom(
-                              backgroundColor: _mouseBroadcastEnabled
-                                  ? Colors.deepOrange : Colors.black87,
-                              foregroundColor: Colors.white,
-                              visualDensity: VisualDensity.compact,
-                            ),
-                            icon: const Icon(Icons.mouse, size: 18),
-                            label: Text(_mouseBroadcastEnabled
-                                ? '멀티클릭 ON' : '멀티클릭 OFF'),
-                            onPressed: () {
-                              final active = bind.mainGetLocalOption(
-                                      key: _mouseBroadcastKey) ==
-                                  sessionId.toString();
-                              if (active) {
-                                bind.mainSetLocalOption(
-                                    key: _mouseBroadcastKey, value: '');
-                                if (mounted) {
-                                  setState(() =>
-                                      _mouseBroadcastEnabled = false);
-                                }
-                              } else {
-                                _showMouseBroadcastTargetsDialog();
-                              }
-                            },
-                          ),
-                        ),
-                        const SizedBox(width: 6),
-                        Tooltip(
-                          message: '멀티클릭 대상 선택',
-                          child: FilledButton.tonalIcon(
-                            onPressed: _showMouseBroadcastTargetsDialog,
-                            icon: const Icon(Icons.tune, size: 18),
-                            label: const Text('대상 선택'),
-                          ),
-                        ),
-                      ],
-                    ),
-                  ),
-                ),
             ],
           ),
         ],

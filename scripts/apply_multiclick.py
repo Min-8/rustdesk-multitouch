@@ -15,6 +15,8 @@ def replace_once(relative, before, after):
 
 rust = "src/flutter_ffi.rs"
 dart = "flutter/lib/desktop/pages/remote_page.dart"
+flutter_core = "src/flutter.rs"
+remote_tab = "flutter/lib/desktop/pages/remote_tab_page.dart"
 
 replace_once(rust,
     "    static ref TEXTURE_RENDER_KEY: Arc<AtomicI32> = Arc::new(AtomicI32::new(0));\n",
@@ -552,4 +554,298 @@ replace_once(dart,
                 ),
 """)
 
-print("Patched RustDesk with select-target multi-click panel")
+replace_once(flutter_core,
+    """impl FlutterHandler {
+    /// Push an event to all the event queues.""",
+    """impl FlutterHandler {
+    /// Return the remote image rectangle in its own pixel coordinates.
+    /// For a source tab use the display selected by that tab, when available.
+    /// For a target use the current display from its remote peer information.
+    pub(crate) fn mouse_broadcast_bounds(
+        &self,
+        ui_session: Option<&SessionID>,
+    ) -> Option<(i32, i32, i32, i32)> {
+        let info = self.peer_info.read().unwrap();
+        let default_display = if info.current_display >= 0 {
+            info.current_display as usize
+        } else {
+            0
+        };
+        let display_index = ui_session
+            .and_then(|id| self.session_handlers.read().unwrap()
+                .get(id)
+                .and_then(|handler| handler.displays.first().copied()))
+            .unwrap_or(default_display);
+        let display = info.displays.get(display_index)?;
+        if display.width <= 0 || display.height <= 0 {
+            return None;
+        }
+        Some((display.x, display.y, display.width, display.height))
+    }
+
+    /// Push an event to all the event queues.""")
+
+replace_once(flutter_core,
+    """    fn switch_display(&self, display: &SwitchDisplay) {
+        let resolutions = serialize_resolutions(&display.resolutions.resolutions);""",
+    """    fn switch_display(&self, display: &SwitchDisplay) {
+        // Refresh the actual pixel geometry when a phone rotates or changes
+        // resolution. Mouse broadcast must not keep using login-time sizes.
+        if display.display >= 0 {
+            let mut peer_info = self.peer_info.write().unwrap();
+            if let Some(current) = peer_info.displays.get_mut(display.display as usize) {
+                current.x = display.x;
+                current.y = display.y;
+                current.width = display.width;
+                current.height = display.height;
+            }
+        }
+        let resolutions = serialize_resolutions(&display.resolutions.resolutions);""")
+
+replace_once(rust,
+    """pub fn session_send_mouse(session_id: SessionID, msg: String) {""",
+    """/// Map one coordinate from the source peer display to the corresponding
+/// proportional position of a target display. Use 64-bit arithmetic to avoid
+/// multiplication overflow and clamp to the visible image boundary.
+fn mouse_broadcast_map_axis(
+    pos: i32, source_origin: i32, source_len: i32,
+    target_origin: i32, target_len: i32,
+) -> i32 {
+    if source_len <= 1 || target_len <= 1 {
+        return target_origin;
+    }
+    let src_range = (source_len - 1) as i64;
+    let dst_range = (target_len - 1) as i64;
+    let offset = (pos as i64 - source_origin as i64).clamp(0, src_range);
+    let scaled = (offset * dst_range + src_range / 2) / src_range;
+    (target_origin as i64 + scaled).clamp(i32::MIN as i64, i32::MAX as i64) as i32
+}
+
+pub fn session_send_mouse(session_id: SessionID, msg: String) {""")
+
+replace_once(rust,
+    """                let selected = MOUSE_BROADCAST_TARGETS.lock().unwrap().clone();
+                if !selected.is_empty() {
+                    for target in sessions::get_sessions() {""",
+    """                let selected = MOUSE_BROADCAST_TARGETS.lock().unwrap().clone();
+                if !selected.is_empty() {
+                    let source_bounds = session.ui_handler
+                        .mouse_broadcast_bounds(Some(&session_id));
+                    for target in sessions::get_sessions() {""")
+
+replace_once(rust,
+    """                        if !selected.contains(&peer_id) {
+                            continue;
+                        }
+                        target.send_mouse(mask, x, y, alt, ctrl, shift, command);""",
+    """                        if !selected.contains(&peer_id) {
+                            continue;
+                        }
+                        // Skip targets without valid display information rather
+                        // than clicking at an unverified/wrong location.
+                        let (Some((sx, sy, sw, sh)), Some((tx, ty, tw, th))) =
+                            (source_bounds, target.ui_handler.mouse_broadcast_bounds(None))
+                        else {
+                            continue;
+                        };
+                        // Flutter sends down/up with x=y=0; they click at the
+                        // last synchronized cursor location. Scale move ONLY.
+                        let (dst_x, dst_y) = if regular_move {
+                            (
+                                mouse_broadcast_map_axis(x, sx, sw, tx, tw),
+                                mouse_broadcast_map_axis(y, sy, sh, ty, th),
+                            )
+                        } else {
+                            (x, y)
+                        };
+                        target.send_mouse(mask, dst_x, dst_y, alt, ctrl, shift, command);""")
+
+replace_once(dart,
+    """  FFI get ffi => (_lastState.value! as _RemotePageState)._ffi;""",
+    """  FFI get ffi => (_lastState.value! as _RemotePageState)._ffi;
+
+  /// Entry point for the compact multi-click control in the window title bar.
+  Future<void> showMouseBroadcastTargetPicker() async {
+    final state = _lastState.value;
+    if (state is _RemotePageState && state.mounted) {
+      await state._showMouseBroadcastTargetsDialog();
+    }
+  }
+
+  bool get isMouseBroadcastSource {
+    final state = _lastState.value;
+    if (state is! _RemotePageState || !state.mounted) return false;
+    return bind.mainGetLocalOption(key: 'mouse-broadcast-source') ==
+        state.sessionId.toString();
+  }""")
+
+replace_once(dart,
+    """              if (isWindows && !_ffi.inputModel.relativeMouseMode.value)
+                Positioned(
+                  bottom: 12,
+                  right: 12,
+                  child: Material(
+                    color: Colors.transparent,
+                    child: Row(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        Tooltip(
+                          message: '멀티클릭 켜기 또는 끄기',
+                          child: FilledButton.icon(
+                            style: FilledButton.styleFrom(
+                              backgroundColor: _mouseBroadcastEnabled
+                                  ? Colors.deepOrange : Colors.black87,
+                              foregroundColor: Colors.white,
+                              visualDensity: VisualDensity.compact,
+                            ),
+                            icon: const Icon(Icons.mouse, size: 18),
+                            label: Text(_mouseBroadcastEnabled
+                                ? '멀티클릭 ON' : '멀티클릭 OFF'),
+                            onPressed: () {
+                              final active = bind.mainGetLocalOption(
+                                      key: _mouseBroadcastKey) ==
+                                  sessionId.toString();
+                              if (active) {
+                                bind.mainSetLocalOption(
+                                    key: _mouseBroadcastKey, value: '');
+                                if (mounted) {
+                                  setState(() =>
+                                      _mouseBroadcastEnabled = false);
+                                }
+                              } else {
+                                _showMouseBroadcastTargetsDialog();
+                              }
+                            },
+                          ),
+                        ),
+                        const SizedBox(width: 6),
+                        Tooltip(
+                          message: '멀티클릭 대상 선택',
+                          child: FilledButton.tonalIcon(
+                            onPressed: _showMouseBroadcastTargetsDialog,
+                            icon: const Icon(Icons.tune, size: 18),
+                            label: const Text('대상 선택'),
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+                ),
+""",
+    """""")
+
+replace_once(dart,
+    """  Timer? _mouseBroadcastTimer;
+  bool _mouseBroadcastEnabled = false;
+""",
+    """""")
+
+replace_once(dart,
+    """    if (isWindows) {
+      _mouseBroadcastTimer =
+          Timer.periodic(const Duration(milliseconds: 600), (_) {
+        if (!mounted) return;
+        final active = bind.mainGetLocalOption(key: _mouseBroadcastKey) ==
+            sessionId.toString();
+        if (active != _mouseBroadcastEnabled) {
+          setState(() => _mouseBroadcastEnabled = active);
+        }
+      });
+    }
+""",
+    """""")
+
+replace_once(dart,
+    """    _mouseBroadcastTimer?.cancel();
+""",
+    """""")
+
+replace_once(dart,
+    """                if (mounted) {
+                  setState(() => _mouseBroadcastEnabled = enabled);
+                }
+""",
+    """""")
+
+replace_once(remote_tab,
+    """            _RelativeMouseModeHint(tabController: tabController),
+            const AddButton(),""",
+    """            _MouseBroadcastTitleButton(tabController: tabController),
+            _RelativeMouseModeHint(tabController: tabController),
+            const AddButton(),""")
+
+replace_once(remote_tab,
+    """/// A widget that displays a hint in the tab bar when relative mouse mode is active.""",
+    """/// Small multi-click selector beside New Connection and window controls.
+/// The currently selected remote tab determines the broadcasting source.
+class _MouseBroadcastTitleButton extends StatefulWidget {
+  final DesktopTabController tabController;
+
+  const _MouseBroadcastTitleButton({Key? key, required this.tabController})
+      : super(key: key);
+
+  @override
+  State<_MouseBroadcastTitleButton> createState() =>
+      _MouseBroadcastTitleButtonState();
+}
+
+class _MouseBroadcastTitleButtonState
+    extends State<_MouseBroadcastTitleButton> {
+  Timer? _statusTimer;
+  bool _lastActive = false;
+
+  RemotePage? get _selectedRemotePage {
+    final state = widget.tabController.state.value;
+    if (state.tabs.isEmpty || state.selected >= state.tabs.length) return null;
+    final selected = state.selectedTabInfo.page;
+    return selected is RemotePage ? selected : null;
+  }
+
+  @override
+  void initState() {
+    super.initState();
+    if (isWindows) {
+      _statusTimer = Timer.periodic(const Duration(milliseconds: 600), (_) {
+        if (!mounted) return;
+        final active = _selectedRemotePage?.isMouseBroadcastSource ?? false;
+        if (active != _lastActive) {
+          setState(() => _lastActive = active);
+        }
+      });
+    }
+  }
+
+  @override
+  void dispose() {
+    _statusTimer?.cancel();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    if (!isWindows) return const SizedBox.shrink();
+    return Obx(() {
+      final remote = _selectedRemotePage;
+      if (remote == null) return const SizedBox.shrink();
+      final active = remote.isMouseBroadcastSource;
+      return Tooltip(
+        message: active ? '멀티클릭 ON · 대상 기기 변경' : '멀티클릭 대상 선택',
+        child: IconButton(
+          icon: Icon(Icons.mouse,
+              size: 18, color: active ? Colors.deepOrange : null),
+          splashRadius: 18,
+          padding: EdgeInsets.zero,
+          constraints: const BoxConstraints(minWidth: 34, minHeight: 28),
+          onPressed: () async {
+            await remote.showMouseBroadcastTargetPicker();
+            if (mounted) setState(() {});
+          },
+        ),
+      );
+    });
+  }
+}
+
+/// A widget that displays a hint in the tab bar when relative mouse mode is active.""")
+
+print("Patched RustDesk with compact multi-click title button and normalized screen coordinates")

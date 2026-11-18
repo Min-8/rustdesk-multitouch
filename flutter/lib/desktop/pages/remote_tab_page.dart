@@ -139,6 +139,7 @@ class _ConnectionTabPageState extends State<ConnectionTabPage> {
         tail: Row(
           mainAxisSize: MainAxisSize.min,
           children: [
+            _MouseBroadcastTitleButton(tabController: tabController),
             _RelativeMouseModeHint(tabController: tabController),
             const AddButton(),
           ],
@@ -558,6 +559,76 @@ class _ConnectionTabPageState extends State<ConnectionTabPage> {
     }
     _update_remote_count();
     return returnValue;
+  }
+}
+
+/// Small multi-click selector beside New Connection and window controls.
+/// The currently selected remote tab determines the broadcasting source.
+class _MouseBroadcastTitleButton extends StatefulWidget {
+  final DesktopTabController tabController;
+
+  const _MouseBroadcastTitleButton({Key? key, required this.tabController})
+      : super(key: key);
+
+  @override
+  State<_MouseBroadcastTitleButton> createState() =>
+      _MouseBroadcastTitleButtonState();
+}
+
+class _MouseBroadcastTitleButtonState
+    extends State<_MouseBroadcastTitleButton> {
+  Timer? _statusTimer;
+  bool _lastActive = false;
+
+  RemotePage? get _selectedRemotePage {
+    final state = widget.tabController.state.value;
+    if (state.tabs.isEmpty || state.selected >= state.tabs.length) return null;
+    final selected = state.selectedTabInfo.page;
+    return selected is RemotePage ? selected : null;
+  }
+
+  @override
+  void initState() {
+    super.initState();
+    if (isWindows) {
+      _statusTimer = Timer.periodic(const Duration(milliseconds: 600), (_) {
+        if (!mounted) return;
+        final active = _selectedRemotePage?.isMouseBroadcastSource ?? false;
+        if (active != _lastActive) {
+          setState(() => _lastActive = active);
+        }
+      });
+    }
+  }
+
+  @override
+  void dispose() {
+    _statusTimer?.cancel();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    if (!isWindows) return const SizedBox.shrink();
+    return Obx(() {
+      final remote = _selectedRemotePage;
+      if (remote == null) return const SizedBox.shrink();
+      final active = remote.isMouseBroadcastSource;
+      return Tooltip(
+        message: active ? '멀티클릭 ON · 대상 기기 변경' : '멀티클릭 대상 선택',
+        child: IconButton(
+          icon: Icon(Icons.mouse,
+              size: 18, color: active ? Colors.deepOrange : null),
+          splashRadius: 18,
+          padding: EdgeInsets.zero,
+          constraints: const BoxConstraints(minWidth: 34, minHeight: 28),
+          onPressed: () async {
+            await remote.showMouseBroadcastTargetPicker();
+            if (mounted) setState(() {});
+          },
+        ),
+      );
+    });
   }
 }
 

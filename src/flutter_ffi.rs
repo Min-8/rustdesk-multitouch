@@ -2053,6 +2053,23 @@ pub fn session_send_pointer(session_id: SessionID, msg: String) {
 ///
 /// If these assumptions are violated (e.g., `relative_mouse_mode` is added to normal events),
 /// legitimate mouse events may be silently dropped by the early-return logic below.
+/// Map one coordinate from the source peer display to the corresponding
+/// proportional position of a target display. Use 64-bit arithmetic to avoid
+/// multiplication overflow and clamp to the visible image boundary.
+fn mouse_broadcast_map_axis(
+    pos: i32, source_origin: i32, source_len: i32,
+    target_origin: i32, target_len: i32,
+) -> i32 {
+    if source_len <= 1 || target_len <= 1 {
+        return target_origin;
+    }
+    let src_range = (source_len - 1) as i64;
+    let dst_range = (target_len - 1) as i64;
+    let offset = (pos as i64 - source_origin as i64).clamp(0, src_range);
+    let scaled = (offset * dst_range + src_range / 2) / src_range;
+    (target_origin as i64 + scaled).clamp(i32::MIN as i64, i32::MAX as i64) as i32
+}
+
 pub fn session_send_mouse(session_id: SessionID, msg: String) {
     if let Ok(m) = serde_json::from_str::<HashMap<String, String>>(&msg) {
         // Relative mouse mode marker validation (Flutter-only).
@@ -2163,6 +2180,8 @@ pub fn session_send_mouse(session_id: SessionID, msg: String) {
             if armed && m.get("relative_mouse_mode").is_none() && (regular_move || click) {
                 let selected = MOUSE_BROADCAST_TARGETS.lock().unwrap().clone();
                 if !selected.is_empty() {
+                    let source_bounds = session.ui_handler
+                        .mouse_broadcast_bounds(Some(&session_id));
                     for target in sessions::get_sessions() {
                         if !target.is_default() || Arc::ptr_eq(&session, &target) {
                             continue;
@@ -2174,7 +2193,24 @@ pub fn session_send_mouse(session_id: SessionID, msg: String) {
                         if !selected.contains(&peer_id) {
                             continue;
                         }
-                        target.send_mouse(mask, x, y, alt, ctrl, shift, command);
+                        // Skip targets without valid display information rather
+                        // than clicking at an unverified/wrong location.
+                        let (Some((sx, sy, sw, sh)), Some((tx, ty, tw, th))) =
+                            (source_bounds, target.ui_handler.mouse_broadcast_bounds(None))
+                        else {
+                            continue;
+                        };
+                        // Flutter sends down/up with x=y=0; they click at the
+                        // last synchronized cursor location. Scale move ONLY.
+                        let (dst_x, dst_y) = if regular_move {
+                            (
+                                mouse_broadcast_map_axis(x, sx, sw, tx, tw),
+                                mouse_broadcast_map_axis(y, sy, sh, ty, th),
+                            )
+                        } else {
+                            (x, y)
+                        };
+                        target.send_mouse(mask, dst_x, dst_y, alt, ctrl, shift, command);
                     }
                 }
             }

@@ -8,6 +8,8 @@ on:
       - 'src/flutter_ffi.rs'
       - 'scripts/apply_multiclick.py'
       - 'flutter/lib/desktop/pages/remote_page.dart'
+      - 'flutter/lib/desktop/pages/remote_tab_page.dart'
+      - 'src/flutter.rs'
   workflow_dispatch:
 
 permissions:
@@ -168,7 +170,13 @@ jobs:
           if (!( (Get-Content -Raw -LiteralPath 'flutter/lib/desktop/pages/remote_page.dart').Contains('멀티클릭 대상 선택') )) {
             throw "Missing target selection UI"
           }
-          Write-Host "Verified multi-click target selection and empty-type mouse movement fix."
+          if (!( (Get-Content -Raw -LiteralPath 'src/flutter_ffi.rs').Contains('mouse_broadcast_map_axis') )) {
+            throw "Missing proportional coordinate transform"
+          }
+          if (!( (Get-Content -Raw -LiteralPath 'flutter/lib/desktop/pages/remote_tab_page.dart').Contains('_MouseBroadcastTitleButton') )) {
+            throw "Missing titlebar multi-click button"
+          }
+          Write-Host "Verified titlebar control, target selection and resolution scaling."
 
       - name: Install LLVM 15
         uses: KyleMayes/install-llvm-action@v2
@@ -273,7 +281,7 @@ jobs:
       actions: read
     env:
       GH_TOKEN: ${{ github.token }}
-      TAG_NAME: v1.5.3-multiclick-preview.3
+      TAG_NAME: v1.5.3-multiclick-preview.4
       ASSET_NAME: RustDesk-MultiClick-Windows-x64.zip
 
     steps:
@@ -303,23 +311,27 @@ jobs:
         shell: bash
         run: |
           cat > RELEASE_NOTES.md <<'EOF'
-          ## RustDesk MultiClick Windows x64 — preview 3
+          ## RustDesk MultiClick Windows x64 — preview 4
 
-          **New:** Click **대상 선택** in a remote-control window to open the
-          multi-click device-selection dialog. Select individual connected
-          remote RustDesk device IDs, or use Select All / Clear All / Refresh.
-          Only selected devices receive mouse movements and left/right clicks.
-          Zero selected devices means broadcasting OFF.
+          **Updated title bar:** One small multi-click mouse icon is placed to
+          the left of New Connection / minimize / maximize / close. The two
+          large overlay buttons have been removed from the remote game image.
+          Click the icon to choose or modify the connected target devices.
+          Choose zero devices and apply to turn broadcasting off.
 
-          **Fix retained:** Empty-type mouse movement events are forwarded,
-          keeping cursors synchronized when clicking.
+          **Different resolutions:** Mouse movement is mapped by normalized
+          (proportional) display coordinates, including screen origin. Source
+          and target images can have different pixel resolutions; clicking
+          stays aligned by relative screen position. Click down/up uses the
+          already-synchronized target cursor position as in RustDesk.
+          A differing screen aspect ratio or app layout can still cause the
+          same *content* to appear in different positions.
 
           - Windows x64; unofficial, unsigned build based on RustDesk 1.5.3
-          - In-memory selection; sources and selections reset when disabled or restarted
+          - In-memory selection; resets when disabled or restarted
           - No hardware-codec feature (--hwcodec)
           - Does not broadcast keyboard, wheel, relative mouse or touch input
-          - CI verifies successful compilation only; test behavior with two
-            connected remote computers before relying on the preview
+          - CI verifies compilation only; behavior needs testing on devices
 
           **Usage:** Extract all ZIP files to a separate folder and run
           rustdesk.exe. Do not overwrite an official RustDesk installation.
@@ -336,7 +348,7 @@ jobs:
           gh release create "$TAG_NAME" "$ASSET_NAME" SHA256SUMS.txt \
             --repo "$GITHUB_REPOSITORY" \
             --target "$GITHUB_SHA" \
-            --title "RustDesk MultiClick Windows x64 — Preview 3 (select targets)" \
+            --title "RustDesk MultiClick Windows x64 — Preview 4 (compact titlebar & resolution scaling)" \
             --notes-file RELEASE_NOTES.md \
             --prerelease
 

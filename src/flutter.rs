@@ -567,6 +567,31 @@ impl SessionHandler {
 }
 
 impl FlutterHandler {
+    /// Return the remote image rectangle in its own pixel coordinates.
+    /// For a source tab use the display selected by that tab, when available.
+    /// For a target use the current display from its remote peer information.
+    pub(crate) fn mouse_broadcast_bounds(
+        &self,
+        ui_session: Option<&SessionID>,
+    ) -> Option<(i32, i32, i32, i32)> {
+        let info = self.peer_info.read().unwrap();
+        let default_display = if info.current_display >= 0 {
+            info.current_display as usize
+        } else {
+            0
+        };
+        let display_index = ui_session
+            .and_then(|id| self.session_handlers.read().unwrap()
+                .get(id)
+                .and_then(|handler| handler.displays.first().copied()))
+            .unwrap_or(default_display);
+        let display = info.displays.get(display_index)?;
+        if display.width <= 0 || display.height <= 0 {
+            return None;
+        }
+        Some((display.x, display.y, display.width, display.height))
+    }
+
     /// Push an event to all the event queues.
     /// An event is stored as json in the event queues.
     ///
@@ -1029,6 +1054,17 @@ impl InvokeUiSession for FlutterHandler {
     }
 
     fn switch_display(&self, display: &SwitchDisplay) {
+        // Refresh the actual pixel geometry when a phone rotates or changes
+        // resolution. Mouse broadcast must not keep using login-time sizes.
+        if display.display >= 0 {
+            let mut peer_info = self.peer_info.write().unwrap();
+            if let Some(current) = peer_info.displays.get_mut(display.display as usize) {
+                current.x = display.x;
+                current.y = display.y;
+                current.width = display.width;
+                current.height = display.height;
+            }
+        }
         let resolutions = serialize_resolutions(&display.resolutions.resolutions);
         self.push_event(
             "switch_display",
