@@ -263,7 +263,7 @@ jobs:
       contents: write
       actions: read
     env:
-      GH_TOKEN: \${{ github.token }}
+      GH_TOKEN: ${{ github.token }}
       TAG_NAME: v1.5.3-multiclick-preview.2
       ASSET_NAME: RustDesk-MultiClick-Windows-x64.zip
 
