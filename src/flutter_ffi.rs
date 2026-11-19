@@ -38,12 +38,16 @@ pub type SessionID = uuid::Uuid;
 
 lazy_static::lazy_static! {
     static ref TEXTURE_RENDER_KEY: Arc<AtomicI32> = Arc::new(AtomicI32::new(0));
-    // Opt-in single broadcaster. In-memory only; OFF after restarting.
-    static ref MOUSE_BROADCAST_SOURCE: std::sync::Mutex<Option<SessionID>> =
-        std::sync::Mutex::new(None);
-    // Explicitly selected connected remote IDs; no implicit broadcast-to-all.
-    static ref MOUSE_BROADCAST_TARGETS: std::sync::Mutex<HashSet<String>> =
-        std::sync::Mutex::new(HashSet::new());
+    // Per-window broadcast configurations; multiple source windows can be ON.
+    static ref MOUSE_BROADCAST_CONFIGS:
+        std::sync::Mutex<HashMap<SessionID, MouseBroadcastConfig>> =
+        std::sync::Mutex::new(HashMap::new());
+}
+
+#[derive(Default)]
+struct MouseBroadcastConfig {
+    enabled: bool,
+    targets: HashSet<String>,
 }
 
 fn initialize(app_dir: &str, custom_client_config: &str) {
@@ -1244,28 +1248,46 @@ pub fn main_http_request(url: String, method: String, body: Option<String>, head
 }
 
 pub fn main_get_local_option(key: String) -> SyncReturn<String> {
-    if key == "mouse-broadcast-source" {
-        let active = MOUSE_BROADCAST_SOURCE.lock().unwrap();
-        return SyncReturn(active.as_ref().map(ToString::to_string).unwrap_or_default());
+    if let Some(uuid) = key.strip_prefix("mouse-broadcast-source:") {
+        let active = uuid::Uuid::parse_str(uuid).ok()
+            .and_then(|id| MOUSE_BROADCAST_CONFIGS.lock().unwrap()
+                .get(&id).map(|config| config.enabled))
+            .unwrap_or(false);
+        return SyncReturn(if active { "Y".to_owned() } else { String::new() });
     }
-    if key == "mouse-broadcast-targets" {
-        let mut selected: Vec<String> = MOUSE_BROADCAST_TARGETS.lock().unwrap()
-            .iter().cloned().collect();
+    if let Some(uuid) = key.strip_prefix("mouse-broadcast-targets:") {
+        let mut selected: Vec<String> = uuid::Uuid::parse_str(uuid).ok()
+            .and_then(|id| MOUSE_BROADCAST_CONFIGS.lock().unwrap()
+                .get(&id).map(|config| config.targets.iter().cloned().collect()))
+            .unwrap_or_default();
         selected.sort();
         return SyncReturn(serde_json::to_string(&selected).unwrap_or_else(|_| "[]".into()));
+    }
+    if key == "mouse-broadcast-connected-peers" {
+        let mut peers: Vec<String> = sessions::get_sessions().into_iter()
+            .filter(|s| s.is_default()
+                && s.connection_round_state.lock().unwrap().is_connected())
+            .map(|s| s.lc.read().unwrap().get_id().to_owned())
+            .filter(|id| !id.is_empty())
+            .collect();
+        peers.sort();
+        peers.dedup();
+        return SyncReturn(serde_json::to_string(&peers).unwrap_or_else(|_| "[]".into()));
     }
     if let Some(source_uuid) = key.strip_prefix("mouse-broadcast-peers:") {
         let source = uuid::Uuid::parse_str(source_uuid).ok()
             .and_then(|id| sessions::get_session_by_session_id(&id));
         let mut peers = Vec::new();
-        if let Some(source) = source {
+        if let Some(source) = source.filter(|s| s.is_default()) {
+            // Hide all windows that point to the source peer, not just one Arc.
+            let source_peer_id = source.lc.read().unwrap().get_id().to_owned();
             for target in sessions::get_sessions() {
                 if !target.is_default() || Arc::ptr_eq(&source, &target) ||
                     !target.connection_round_state.lock().unwrap().is_connected() {
                     continue;
                 }
                 let peer_id = target.lc.read().unwrap().get_id().to_owned();
-                if !peer_id.is_empty() {
+                if !peer_id.is_empty() && peer_id != source_peer_id {
                     peers.push(peer_id);
                 }
             }
@@ -1315,14 +1337,19 @@ pub fn main_set_env(key: String, value: Option<String>) -> SyncReturn<()> {
 }
 
 pub fn main_set_local_option(key: String, value: String) {
-    if key == "mouse-broadcast-source" {
-        // OFF only disarms broadcasting; retain target IDs for the next ON.
-        // Reopening the picker restores the user's previous selections.
-        *MOUSE_BROADCAST_SOURCE.lock().unwrap() =
-            uuid::Uuid::parse_str(&value).ok();
+    if let Some(uuid) = key.strip_prefix("mouse-broadcast-source:") {
+        if let Ok(source_id) = uuid::Uuid::parse_str(uuid) {
+            let mut configs = MOUSE_BROADCAST_CONFIGS.lock().unwrap();
+            let config = configs.entry(source_id).or_default();
+            // OFF only disables this window, retaining its own target choices.
+            config.enabled = value == "Y" && !config.targets.is_empty();
+        }
         return;
     }
-    if key == "mouse-broadcast-targets" {
+    if let Some(uuid) = key.strip_prefix("mouse-broadcast-targets:") {
+        let Ok(source_id) = uuid::Uuid::parse_str(uuid) else {
+            return;
+        };
         let requested = match serde_json::from_str::<Vec<String>>(&value) {
             Ok(ids) => ids,
             Err(_) => {
@@ -1330,13 +1357,26 @@ pub fn main_set_local_option(key: String, value: String) {
                 return;
             }
         };
-        // Preserve selections if a remote device temporarily disconnects.
-        // Dispatch still checks the target is actually connected before sending.
-        *MOUSE_BROADCAST_TARGETS.lock().unwrap() = requested
-            .into_iter()
-            .filter(|id| !id.trim().is_empty() && id.len() <= 256)
+        let source_peer_id = sessions::get_session_by_session_id(&source_id)
+            .map(|s| s.lc.read().unwrap().get_id().to_owned())
+            .unwrap_or_default();
+        let selected: HashSet<String> = requested.into_iter()
+            .filter(|id| !id.trim().is_empty() && id.len() <= 256
+                && *id != source_peer_id)
             .take(512)
             .collect();
+        let mut configs = MOUSE_BROADCAST_CONFIGS.lock().unwrap();
+        let config = configs.entry(source_id).or_default();
+        config.targets = selected;
+        if config.targets.is_empty() {
+            config.enabled = false;
+        }
+        return;
+    }
+    if let Some(uuid) = key.strip_prefix("mouse-broadcast-close:") {
+        if let Ok(source_id) = uuid::Uuid::parse_str(uuid) {
+            MOUSE_BROADCAST_CONFIGS.lock().unwrap().remove(&source_id);
+        }
         return;
     }
     let is_texture_render_key = key.eq(keys::OPTION_TEXTURE_RENDER);
@@ -2171,10 +2211,16 @@ pub fn session_send_mouse(session_id: SessionID, msg: String) {
                 && m.contains_key("x") && m.contains_key("y");
             let click = matches!(m.get("type").map(String::as_str), Some("down") | Some("up"))
                 && matches!(m.get("buttons").map(String::as_str), Some("left") | Some("right"));
-            let armed = MOUSE_BROADCAST_SOURCE.lock().unwrap().as_ref() == Some(&session_id);
-            if armed && m.get("relative_mouse_mode").is_none() && (regular_move || click) {
-                let selected = MOUSE_BROADCAST_TARGETS.lock().unwrap().clone();
-                if !selected.is_empty() {
+            // Only this source window's checked peers receive input. Direct
+            // target sends do not call session_send_mouse again (no feedback).
+            let selected: HashSet<String> = MOUSE_BROADCAST_CONFIGS.lock().unwrap()
+                .get(&session_id)
+                .filter(|config| config.enabled)
+                .map(|config| config.targets.clone())
+                .unwrap_or_default();
+            if !selected.is_empty() && m.get("relative_mouse_mode").is_none()
+                && (regular_move || click) {
+                    let source_peer_id = session.lc.read().unwrap().get_id().to_owned();
                     let source_bounds = session.ui_handler
                         .mouse_broadcast_bounds(Some(&session_id));
                     for target in sessions::get_sessions() {
@@ -2185,7 +2231,7 @@ pub fn session_send_mouse(session_id: SessionID, msg: String) {
                             continue;
                         }
                         let peer_id = target.lc.read().unwrap().get_id().to_owned();
-                        if !selected.contains(&peer_id) {
+                        if peer_id == source_peer_id || !selected.contains(&peer_id) {
                             continue;
                         }
                         // Skip targets without valid display information rather
@@ -2207,7 +2253,6 @@ pub fn session_send_mouse(session_id: SessionID, msg: String) {
                         };
                         target.send_mouse(mask, dst_x, dst_y, alt, ctrl, shift, command);
                     }
-                }
             }
         }
     }

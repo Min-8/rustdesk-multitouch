@@ -1,4 +1,6 @@
 import 'dart:ui' as ui;
+import 'dart:async';
+import 'dart:convert';
 
 import 'package:bot_toast/bot_toast.dart';
 import 'package:flutter/material.dart';
@@ -44,6 +46,44 @@ EdgeInsets? _menuPadding() {
 
 class _PeerTabPageState extends State<PeerTabPage>
     with SingleTickerProviderStateMixin {
+  Timer? _connectedPeersTimer;
+
+  void _syncConnectedPeers() {
+    if (!mounted || !isWindows) return;
+    Set<String> peers = <String>{};
+    try {
+      final raw = bind.mainGetLocalOption(
+          key: 'mouse-broadcast-connected-peers');
+      final decoded = jsonDecode(raw);
+      if (decoded is List) {
+        peers = decoded.whereType<String>().toSet();
+      }
+    } catch (_) {
+      // Old native builds can lack the session-list option.
+    }
+    final before = connectedRemotePeerIds.value;
+    if (before.length != peers.length || !before.containsAll(peers)) {
+      connectedRemotePeerIds.value = peers;
+    }
+  }
+
+  @override
+  void initState() {
+    super.initState();
+    if (isWindows) {
+      _syncConnectedPeers();
+      _connectedPeersTimer = Timer.periodic(
+          const Duration(milliseconds: 900), (_) => _syncConnectedPeers());
+    }
+  }
+
+  @override
+  void dispose() {
+    _connectedPeersTimer?.cancel();
+    if (isWindows) connectedRemotePeerIds.value = <String>{};
+    super.dispose();
+  }
+
   final List<_TabEntry> entries = [
     _TabEntry(RecentPeersView(
       menuPadding: _menuPadding(),

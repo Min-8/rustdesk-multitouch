@@ -81,14 +81,16 @@ class RemotePage extends StatefulWidget {
   bool get isMouseBroadcastSource {
     final state = _lastState.value;
     if (state is! _RemotePageState || !state.mounted) return false;
-    return bind.mainGetLocalOption(key: 'mouse-broadcast-source') ==
-        state.sessionId.toString();
+    return bind.mainGetLocalOption(
+        key: 'mouse-broadcast-source:${state.sessionId}') == 'Y';
   }
 
   /// Stop sending input without losing any selected remote device IDs.
   void stopMouseBroadcast() {
-    if (isMouseBroadcastSource) {
-      bind.mainSetLocalOption(key: 'mouse-broadcast-source', value: '');
+    final state = _lastState.value;
+    if (state is _RemotePageState && state.mounted && isMouseBroadcastSource) {
+      bind.mainSetLocalOption(
+          key: 'mouse-broadcast-source:${state.sessionId}', value: '');
     }
   }
 
@@ -113,8 +115,8 @@ class _RemotePageState extends State<RemotePage>
         MultiWindowListener,
         WidgetsBindingObserver,
         TickerProviderStateMixin {
-  static const _mouseBroadcastKey = 'mouse-broadcast-source';
-  static const _mouseBroadcastTargetsKey = 'mouse-broadcast-targets';
+  static const _mouseBroadcastKey = 'mouse-broadcast-source:';
+  static const _mouseBroadcastTargetsKey = 'mouse-broadcast-targets:';
   Timer? _timer;
   String keyboardMode = "legacy";
   bool _isWindowBlur = false;
@@ -193,7 +195,8 @@ class _RemotePageState extends State<RemotePage>
   Set<String> _getSelectedMouseBroadcastTargets() {
     try {
       final value =
-          bind.mainGetLocalOption(key: _mouseBroadcastTargetsKey);
+          bind.mainGetLocalOption(
+              key: '$_mouseBroadcastTargetsKey${sessionId.toString()}');
       final decoded = jsonDecode(value);
       if (decoded is List) {
         return decoded.whereType<String>().toSet();
@@ -208,7 +211,7 @@ class _RemotePageState extends State<RemotePage>
     if (!mounted) return;
     // Remember selections independently from whether broadcasting is ON.
     final connected = _getMouseBroadcastPeers().toSet();
-    final selected = _getSelectedMouseBroadcastTargets();
+    final selected = _getSelectedMouseBroadcastTargets()..remove(widget.id);
     // Show previously selected offline devices too, so they are never lost.
     final peers = <String>{...connected, ...selected}.toList()..sort();
     final scrollController = ScrollController();
@@ -284,8 +287,10 @@ class _RemotePageState extends State<RemotePage>
                       ],
                     ),
                     const Divider(height: 8),
-                    ConstrainedBox(
-                      constraints: const BoxConstraints(maxHeight: 300),
+                    SizedBox(
+                      height: peers.isEmpty
+                          ? 56
+                          : (peers.length > 7 ? 252.0 : peers.length * 36.0),
                       child: peers.isEmpty
                           ? const Padding(
                               padding: EdgeInsets.symmetric(vertical: 18),
@@ -304,12 +309,16 @@ class _RemotePageState extends State<RemotePage>
                               ),
                               child: Scrollbar(
                                 controller: scrollController,
-                                thumbVisibility: peers.length > 8,
+                                thumbVisibility: peers.length > 7,
+                                trackVisibility: peers.length > 7,
+                                interactive: true,
                                 child: ListView.builder(
                                   controller: scrollController,
-                                  shrinkWrap: true,
+                                  primary: false,
+                                  shrinkWrap: false,
                                   itemExtent: 36,
-                                  physics: const ClampingScrollPhysics(),
+                                  physics: const AlwaysScrollableScrollPhysics(
+                                      parent: ClampingScrollPhysics()),
                                   itemCount: peers.length,
                                   itemBuilder: (context, index) {
                                     final peer = peers[index];
@@ -396,6 +405,7 @@ class _RemotePageState extends State<RemotePage>
                               ),
                             ),
                     ),
+                    const Divider(height: 14, thickness: 1),
                   ],
                 ),
               ),
@@ -408,13 +418,11 @@ class _RemotePageState extends State<RemotePage>
                   onPressed: () {
                     final targetList = selected.toList()..sort();
                     bind.mainSetLocalOption(
-                        key: _mouseBroadcastTargetsKey,
+                        key: '$_mouseBroadcastTargetsKey${sessionId.toString()}',
                         value: jsonEncode(targetList));
                     bind.mainSetLocalOption(
-                        key: _mouseBroadcastKey,
-                        value: selected.isNotEmpty
-                            ? sessionId.toString()
-                            : '');
+                        key: '$_mouseBroadcastKey${sessionId.toString()}',
+                        value: selected.isNotEmpty ? 'Y' : '');
                     Navigator.of(dialogContext).pop();
                   },
                   child: Text(selected.isEmpty
@@ -937,11 +945,11 @@ class _RemotePageState extends State<RemotePage>
   @override
   Future<void> dispose() async {
     final closeSession = closeSessionOnDispose.remove(widget.id) ?? true;
-    if (isWindows &&
-        closeSession &&
-        bind.mainGetLocalOption(key: _mouseBroadcastKey) ==
-            sessionId.toString()) {
-      bind.mainSetLocalOption(key: _mouseBroadcastKey, value: '');
+    if (isWindows && closeSession) {
+      // Drop only this closed session's configuration. Other windows stay ON.
+      bind.mainSetLocalOption(
+          key: 'mouse-broadcast-close:${sessionId.toString()}',
+          value: '');
     }
 
     // https://github.com/flutter/flutter/issues/64935

@@ -17,6 +17,8 @@ rust = "src/flutter_ffi.rs"
 dart = "flutter/lib/desktop/pages/remote_page.dart"
 flutter_core = "src/flutter.rs"
 remote_tab = "flutter/lib/desktop/pages/remote_tab_page.dart"
+peer_card = "flutter/lib/common/widgets/peer_card.dart"
+peer_tab = "flutter/lib/common/widgets/peer_tab_page.dart"
 
 replace_once(rust,
     "    static ref TEXTURE_RENDER_KEY: Arc<AtomicI32> = Arc::new(AtomicI32::new(0));\n",
@@ -1296,4 +1298,423 @@ replace_once(remote_tab,
             if (mounted) setState(() {});
           },""")
 
-print("Patched RustDesk with retained target selections, alias labels, and draggable compact list")
+replace_once(rust,
+    """    // Opt-in single broadcaster. In-memory only; OFF after restarting.
+    static ref MOUSE_BROADCAST_SOURCE: std::sync::Mutex<Option<SessionID>> =
+        std::sync::Mutex::new(None);
+    // Explicitly selected connected remote IDs; no implicit broadcast-to-all.
+    static ref MOUSE_BROADCAST_TARGETS: std::sync::Mutex<HashSet<String>> =
+        std::sync::Mutex::new(HashSet::new());""",
+    """    // Per-window broadcast configurations; multiple source windows can be ON.
+    static ref MOUSE_BROADCAST_CONFIGS:
+        std::sync::Mutex<HashMap<SessionID, MouseBroadcastConfig>> =
+        std::sync::Mutex::new(HashMap::new());""")
+
+replace_once(rust,
+    """fn initialize(app_dir: &str, custom_client_config: &str) {""",
+    """#[derive(Default)]
+struct MouseBroadcastConfig {
+    enabled: bool,
+    targets: HashSet<String>,
+}
+
+fn initialize(app_dir: &str, custom_client_config: &str) {""")
+
+replace_once(rust,
+    """    if key == "mouse-broadcast-source" {
+        let active = MOUSE_BROADCAST_SOURCE.lock().unwrap();
+        return SyncReturn(active.as_ref().map(ToString::to_string).unwrap_or_default());
+    }
+    if key == "mouse-broadcast-targets" {
+        let mut selected: Vec<String> = MOUSE_BROADCAST_TARGETS.lock().unwrap()
+            .iter().cloned().collect();
+        selected.sort();
+        return SyncReturn(serde_json::to_string(&selected).unwrap_or_else(|_| "[]".into()));
+    }""",
+    """    if let Some(uuid) = key.strip_prefix("mouse-broadcast-source:") {
+        let active = uuid::Uuid::parse_str(uuid).ok()
+            .and_then(|id| MOUSE_BROADCAST_CONFIGS.lock().unwrap()
+                .get(&id).map(|config| config.enabled))
+            .unwrap_or(false);
+        return SyncReturn(if active { "Y".to_owned() } else { String::new() });
+    }
+    if let Some(uuid) = key.strip_prefix("mouse-broadcast-targets:") {
+        let mut selected: Vec<String> = uuid::Uuid::parse_str(uuid).ok()
+            .and_then(|id| MOUSE_BROADCAST_CONFIGS.lock().unwrap()
+                .get(&id).map(|config| config.targets.iter().cloned().collect()))
+            .unwrap_or_default();
+        selected.sort();
+        return SyncReturn(serde_json::to_string(&selected).unwrap_or_else(|_| "[]".into()));
+    }
+    if key == "mouse-broadcast-connected-peers" {
+        let mut peers: Vec<String> = sessions::get_sessions().into_iter()
+            .filter(|s| s.is_default()
+                && s.connection_round_state.lock().unwrap().is_connected())
+            .map(|s| s.lc.read().unwrap().get_id().to_owned())
+            .filter(|id| !id.is_empty())
+            .collect();
+        peers.sort();
+        peers.dedup();
+        return SyncReturn(serde_json::to_string(&peers).unwrap_or_else(|_| "[]".into()));
+    }""")
+
+replace_once(rust,
+    """        if let Some(source) = source {
+            for target in sessions::get_sessions() {
+                if !target.is_default() || Arc::ptr_eq(&source, &target) ||
+                    !target.connection_round_state.lock().unwrap().is_connected() {
+                    continue;
+                }
+                let peer_id = target.lc.read().unwrap().get_id().to_owned();
+                if !peer_id.is_empty() {
+                    peers.push(peer_id);
+                }
+            }
+        }""",
+    """        if let Some(source) = source.filter(|s| s.is_default()) {
+            // Hide all windows that point to the source peer, not just one Arc.
+            let source_peer_id = source.lc.read().unwrap().get_id().to_owned();
+            for target in sessions::get_sessions() {
+                if !target.is_default() || Arc::ptr_eq(&source, &target) ||
+                    !target.connection_round_state.lock().unwrap().is_connected() {
+                    continue;
+                }
+                let peer_id = target.lc.read().unwrap().get_id().to_owned();
+                if !peer_id.is_empty() && peer_id != source_peer_id {
+                    peers.push(peer_id);
+                }
+            }
+        }""")
+
+replace_once(rust,
+    """    if key == "mouse-broadcast-source" {
+        // OFF only disarms broadcasting; retain target IDs for the next ON.
+        // Reopening the picker restores the user's previous selections.
+        *MOUSE_BROADCAST_SOURCE.lock().unwrap() =
+            uuid::Uuid::parse_str(&value).ok();
+        return;
+    }
+    if key == "mouse-broadcast-targets" {
+        let requested = match serde_json::from_str::<Vec<String>>(&value) {
+            Ok(ids) => ids,
+            Err(_) => {
+                log::warn!("Ignoring malformed mouse-broadcast target selection");
+                return;
+            }
+        };
+        // Preserve selections if a remote device temporarily disconnects.
+        // Dispatch still checks the target is actually connected before sending.
+        *MOUSE_BROADCAST_TARGETS.lock().unwrap() = requested
+            .into_iter()
+            .filter(|id| !id.trim().is_empty() && id.len() <= 256)
+            .take(512)
+            .collect();
+        return;
+    }
+""",
+    """    if let Some(uuid) = key.strip_prefix("mouse-broadcast-source:") {
+        if let Ok(source_id) = uuid::Uuid::parse_str(uuid) {
+            let mut configs = MOUSE_BROADCAST_CONFIGS.lock().unwrap();
+            let config = configs.entry(source_id).or_default();
+            // OFF only disables this window, retaining its own target choices.
+            config.enabled = value == "Y" && !config.targets.is_empty();
+        }
+        return;
+    }
+    if let Some(uuid) = key.strip_prefix("mouse-broadcast-targets:") {
+        let Ok(source_id) = uuid::Uuid::parse_str(uuid) else {
+            return;
+        };
+        let requested = match serde_json::from_str::<Vec<String>>(&value) {
+            Ok(ids) => ids,
+            Err(_) => {
+                log::warn!("Ignoring malformed mouse-broadcast target selection");
+                return;
+            }
+        };
+        let source_peer_id = sessions::get_session_by_session_id(&source_id)
+            .map(|s| s.lc.read().unwrap().get_id().to_owned())
+            .unwrap_or_default();
+        let selected: HashSet<String> = requested.into_iter()
+            .filter(|id| !id.trim().is_empty() && id.len() <= 256
+                && *id != source_peer_id)
+            .take(512)
+            .collect();
+        let mut configs = MOUSE_BROADCAST_CONFIGS.lock().unwrap();
+        let config = configs.entry(source_id).or_default();
+        config.targets = selected;
+        if config.targets.is_empty() {
+            config.enabled = false;
+        }
+        return;
+    }
+    if let Some(uuid) = key.strip_prefix("mouse-broadcast-close:") {
+        if let Ok(source_id) = uuid::Uuid::parse_str(uuid) {
+            MOUSE_BROADCAST_CONFIGS.lock().unwrap().remove(&source_id);
+        }
+        return;
+    }
+""")
+
+replace_once(rust,
+    """            let armed = MOUSE_BROADCAST_SOURCE.lock().unwrap().as_ref() == Some(&session_id);
+            if armed && m.get("relative_mouse_mode").is_none() && (regular_move || click) {
+                let selected = MOUSE_BROADCAST_TARGETS.lock().unwrap().clone();
+                if !selected.is_empty() {
+                    let source_bounds = session.ui_handler""",
+    """            // Only this source window's checked peers receive input. Direct
+            // target sends do not call session_send_mouse again (no feedback).
+            let selected: HashSet<String> = MOUSE_BROADCAST_CONFIGS.lock().unwrap()
+                .get(&session_id)
+                .filter(|config| config.enabled)
+                .map(|config| config.targets.clone())
+                .unwrap_or_default();
+            if !selected.is_empty() && m.get("relative_mouse_mode").is_none()
+                && (regular_move || click) {
+                    let source_peer_id = session.lc.read().unwrap().get_id().to_owned();
+                    let source_bounds = session.ui_handler""")
+
+replace_once(rust,
+    """                        if !selected.contains(&peer_id) {
+                            continue;
+                        }""",
+    """                        if peer_id == source_peer_id || !selected.contains(&peer_id) {
+                            continue;
+                        }""")
+
+replace_once(rust,
+    """                    }
+                }
+            }
+        }
+    }
+}
+
+pub fn session_restart_remote_device""",
+    """                    }
+            }
+        }
+    }
+}
+
+pub fn session_restart_remote_device""")
+
+replace_once(dart,
+    """  static const _mouseBroadcastKey = 'mouse-broadcast-source';
+  static const _mouseBroadcastTargetsKey = 'mouse-broadcast-targets';""",
+    """  static const _mouseBroadcastKey = 'mouse-broadcast-source:';
+  static const _mouseBroadcastTargetsKey = 'mouse-broadcast-targets:';""")
+
+replace_once(dart,
+    """    return bind.mainGetLocalOption(key: 'mouse-broadcast-source') ==
+        state.sessionId.toString();""",
+    """    return bind.mainGetLocalOption(
+        key: 'mouse-broadcast-source:${state.sessionId}') == 'Y';""")
+
+replace_once(dart,
+    """  void stopMouseBroadcast() {
+    if (isMouseBroadcastSource) {
+      bind.mainSetLocalOption(key: 'mouse-broadcast-source', value: '');
+    }
+  }""",
+    """  void stopMouseBroadcast() {
+    final state = _lastState.value;
+    if (state is _RemotePageState && state.mounted && isMouseBroadcastSource) {
+      bind.mainSetLocalOption(
+          key: 'mouse-broadcast-source:${state.sessionId}', value: '');
+    }
+  }""")
+
+replace_once(dart,
+    """          bind.mainGetLocalOption(key: _mouseBroadcastTargetsKey);""",
+    """          bind.mainGetLocalOption(
+              key: '$_mouseBroadcastTargetsKey${sessionId.toString()}');""")
+
+replace_once(dart,
+    """    final selected = _getSelectedMouseBroadcastTargets();""",
+    """    final selected = _getSelectedMouseBroadcastTargets()..remove(widget.id);""")
+
+replace_once(dart,
+    """                    bind.mainSetLocalOption(
+                        key: _mouseBroadcastTargetsKey,
+                        value: jsonEncode(targetList));
+                    bind.mainSetLocalOption(
+                        key: _mouseBroadcastKey,
+                        value: selected.isNotEmpty
+                            ? sessionId.toString()
+                            : '');""",
+    """                    bind.mainSetLocalOption(
+                        key: '$_mouseBroadcastTargetsKey${sessionId.toString()}',
+                        value: jsonEncode(targetList));
+                    bind.mainSetLocalOption(
+                        key: '$_mouseBroadcastKey${sessionId.toString()}',
+                        value: selected.isNotEmpty ? 'Y' : '');""")
+
+replace_once(dart,
+    """    if (isWindows &&
+        closeSession &&
+        bind.mainGetLocalOption(key: _mouseBroadcastKey) ==
+            sessionId.toString()) {
+      bind.mainSetLocalOption(key: _mouseBroadcastKey, value: '');
+    }""",
+    """    if (isWindows && closeSession) {
+      // Drop only this closed session's configuration. Other windows stay ON.
+      bind.mainSetLocalOption(
+          key: 'mouse-broadcast-close:${sessionId.toString()}',
+          value: '');
+    }""")
+
+replace_once(dart,
+    """                    ConstrainedBox(
+                      constraints: const BoxConstraints(maxHeight: 300),
+                      child: peers.isEmpty""",
+    """                    SizedBox(
+                      height: peers.isEmpty
+                          ? 56
+                          : (peers.length > 7 ? 252.0 : peers.length * 36.0),
+                      child: peers.isEmpty""")
+
+replace_once(dart,
+    """                                thumbVisibility: peers.length > 8,
+                                child: ListView.builder(
+                                  controller: scrollController,
+                                  shrinkWrap: true,
+                                  itemExtent: 36,
+                                  physics: const ClampingScrollPhysics(),""",
+    """                                thumbVisibility: peers.length > 7,
+                                trackVisibility: peers.length > 7,
+                                interactive: true,
+                                child: ListView.builder(
+                                  controller: scrollController,
+                                  primary: false,
+                                  shrinkWrap: false,
+                                  itemExtent: 36,
+                                  physics: const AlwaysScrollableScrollPhysics(
+                                      parent: ClampingScrollPhysics()),""")
+
+replace_once(dart,
+    """                                  },
+                                ),
+                              ),
+                            ),
+                    ),
+                  ],
+                ),
+              ),
+              actions: [""",
+    """                                  },
+                                ),
+                              ),
+                            ),
+                    ),
+                    const Divider(height: 14, thickness: 1),
+                  ],
+                ),
+              ),
+              actions: [""")
+
+replace_once(peer_card,
+    """final peerCardUiType = PeerUiType.grid.obs;""",
+    """final peerCardUiType = PeerUiType.grid.obs;
+
+// True if this RustDesk instance currently controls the remote peer.
+// This is separate from the existing online/reachable indicator.
+final connectedRemotePeerIds = ValueNotifier<Set<String>>(<String>{});""")
+
+replace_once(peer_card,
+    """  Widget gestureDetector({required Widget child}) {""",
+    """  Widget _activeRemoteBadge(String peerId) =>
+      ValueListenableBuilder<Set<String>>(
+        valueListenable: connectedRemotePeerIds,
+        builder: (context, peers, _) {
+          if (!isWindows || !peers.contains(peerId)) {
+            return const SizedBox.shrink();
+          }
+          return Tooltip(
+            message: '현재 원격 연결 중',
+            child: Container(
+              margin: const EdgeInsets.only(right: 4),
+              padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 2),
+              decoration: BoxDecoration(
+                color: Colors.green.withOpacity(0.14),
+                borderRadius: BorderRadius.circular(4),
+              ),
+              child: const Text('접속 중',
+                  style: TextStyle(
+                      color: Colors.green,
+                      fontSize: 10,
+                      fontWeight: FontWeight.w600)),
+            ),
+          );
+        },
+      );
+
+  Widget gestureDetector({required Widget child}) {""")
+
+replace_once(peer_card,
+    """                        getOnline(isPortrait ? 4 : 8, peer.online),
+                        Expanded(""",
+    """                        getOnline(isPortrait ? 4 : 8, peer.online),
+                        _activeRemoteBadge(peer.id),
+                        Expanded(""")
+
+replace_once(peer_card,
+    """                        getOnline(8, peer.online),
+                        Expanded(""",
+    """                        getOnline(8, peer.online),
+                        _activeRemoteBadge(peer.id),
+                        Expanded(""")
+
+replace_once(peer_tab,
+    """import 'dart:ui' as ui;""",
+    """import 'dart:ui' as ui;
+import 'dart:async';
+import 'dart:convert';""")
+
+replace_once(peer_tab,
+    """class _PeerTabPageState extends State<PeerTabPage>
+    with SingleTickerProviderStateMixin {
+  final List<_TabEntry> entries = [""",
+    """class _PeerTabPageState extends State<PeerTabPage>
+    with SingleTickerProviderStateMixin {
+  Timer? _connectedPeersTimer;
+
+  void _syncConnectedPeers() {
+    if (!mounted || !isWindows) return;
+    Set<String> peers = <String>{};
+    try {
+      final raw = bind.mainGetLocalOption(
+          key: 'mouse-broadcast-connected-peers');
+      final decoded = jsonDecode(raw);
+      if (decoded is List) {
+        peers = decoded.whereType<String>().toSet();
+      }
+    } catch (_) {
+      // Old native builds can lack the session-list option.
+    }
+    final before = connectedRemotePeerIds.value;
+    if (before.length != peers.length || !before.containsAll(peers)) {
+      connectedRemotePeerIds.value = peers;
+    }
+  }
+
+  @override
+  void initState() {
+    super.initState();
+    if (isWindows) {
+      _syncConnectedPeers();
+      _connectedPeersTimer = Timer.periodic(
+          const Duration(milliseconds: 900), (_) => _syncConnectedPeers());
+    }
+  }
+
+  @override
+  void dispose() {
+    _connectedPeersTimer?.cancel();
+    if (isWindows) connectedRemotePeerIds.value = <String>{};
+    super.dispose();
+  }
+
+  final List<_TabEntry> entries = [""")
+
+print("Patched RustDesk with independent multi-click sources, scrollable picker and active connection badges")

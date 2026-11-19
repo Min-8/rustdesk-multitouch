@@ -10,6 +10,8 @@ on:
       - 'flutter/lib/desktop/pages/remote_page.dart'
       - 'flutter/lib/desktop/pages/remote_tab_page.dart'
       - 'src/flutter.rs'
+      - 'flutter/lib/common/widgets/peer_card.dart'
+      - 'flutter/lib/common/widgets/peer_tab_page.dart'
   workflow_dispatch:
 
 permissions:
@@ -38,7 +40,7 @@ jobs:
           if test -f src/flutter_ffi.rs; then
             echo "RustDesk source already exists; skipping import."
             test -f flutter/lib/desktop/pages/remote_page.dart
-            grep -q MOUSE_BROADCAST_SOURCE src/flutter_ffi.rs
+            grep -q MOUSE_BROADCAST_CONFIGS src/flutter_ffi.rs
             exit 0
           fi
 
@@ -150,7 +152,7 @@ jobs:
         shell: pwsh
         run: |
           if (!(Test-Path src/flutter_ffi.rs)) { throw "Upstream source not imported" }
-          if (!(Select-String -Path src/flutter_ffi.rs -Pattern 'MOUSE_BROADCAST_SOURCE' -Quiet)) {
+          if (!(Select-String -Path src/flutter_ffi.rs -Pattern 'MOUSE_BROADCAST_CONFIGS' -Quiet)) {
             throw "Multi-click patch not applied"
           }
           $fixedPredicate = 'let regular_move = m.get("type").map_or(true, |t| t.is_empty())'
@@ -163,7 +165,7 @@ jobs:
             throw "Expected Flutter's empty mouse movement type was not found"
           }
           foreach ($path in @('src/flutter_ffi.rs', 'scripts/apply_multiclick.py')) {
-            if (!( (Get-Content -Raw -LiteralPath $path).Contains('MOUSE_BROADCAST_TARGETS') )) {
+            if (!( (Get-Content -Raw -LiteralPath $path).Contains('MOUSE_BROADCAST_CONFIGS') )) {
               throw "Missing selected-target routing in $path"
             }
           }
@@ -189,10 +191,22 @@ jobs:
             }
           }
           $core = Get-Content -Raw -LiteralPath 'src/flutter_ffi.rs'
-          if (!($core.Contains('OFF only disarms broadcasting; retain target IDs'))) {
-            throw "Missing selection preservation when turning multi-click OFF"
+          if (!($core.Contains('mouse-broadcast-targets:') -and
+                  $core.Contains('mouse-broadcast-connected-peers') -and
+                  $core.Contains('peer_id == source_peer_id'))) {
+            throw "Missing independent multi-source routing or self-exclusion"
           }
-          Write-Host "Verified one-click OFF, target retention, alias labels, and draggable scroll list."
+          if (!( (Get-Content -Raw -LiteralPath 'flutter/lib/common/widgets/peer_card.dart').Contains('connectedRemotePeerIds') )) {
+            throw "Missing connected badges on main screen"
+          }
+          if (!( (Get-Content -Raw -LiteralPath 'flutter/lib/common/widgets/peer_tab_page.dart').Contains('_syncConnectedPeers') )) {
+            throw "Missing main screen connected-status polling"
+          }
+          if (!($picker.Contains('AlwaysScrollableScrollPhysics') -and
+                  $picker.Contains('const Divider(height: 14, thickness: 1)'))) {
+            throw "Missing scrollable fixed-height picker and bottom divider"
+          }
+          Write-Host "Verified per-window broadcasting, self-exclusion, list scrolling, and connected badges."
 
       - name: Install LLVM 15
         uses: KyleMayes/install-llvm-action@v2
@@ -297,7 +311,7 @@ jobs:
       actions: read
     env:
       GH_TOKEN: ${{ github.token }}
-      TAG_NAME: v1.5.3-multiclick-preview.5
+      TAG_NAME: v1.5.3-multiclick-preview.6
       ASSET_NAME: RustDesk-MultiClick-Windows-x64.zip
 
     steps:
@@ -327,35 +341,35 @@ jobs:
         shell: bash
         run: |
           cat > RELEASE_NOTES.md <<'EOF'
-          ## RustDesk MultiClick Windows x64 — preview 5
+          ## RustDesk MultiClick Windows x64 — preview 6
 
-          **One-button workflow**
-          - OFF mouse icon: open the target selection dialog.
-          - Choose multiple connected target devices and Apply: icon turns red (ON).
-          - ON red mouse icon: click once to turn OFF without clearing the device selection.
-          - Next OFF click opens the dialog with the previous target list selected.
+          **Independent multi-click sources**
+          - Each remote window keeps its own target checkbox list and ON/OFF state.
+          - Multiple windows can be ON simultaneously (e.g., 1 and 3).
+          - A window can never select or broadcast back to its own remote device.
+          - Clicking its red ON mouse icon turns only that window OFF.
+            Reopening restores that window's previously selected devices.
 
-          **Improved device picker**
-          - Shorter Korean dialog title and description.
-          - Compact checkbox rows and smaller Select All / Clear All controls.
-          - Scroll a long list with the mouse wheel, visible scrollbar,
-            or press-and-drag the list with the mouse like a touchscreen.
-          - Saved device aliases are shown before the numeric RustDesk ID.
-          - Temporarily disconnected previously selected peers are retained
-            and shown as offline when reopening the dialog.
-          - Several target checkboxes can be active simultaneously.
+          **Improved picker**
+          - A bounded-height list displays a scrollbar when there are many devices.
+          - Scroll with mouse wheel, drag the scrollbar or press-and-drag.
+          - A separator line appears below the device list.
+          - Device aliases remain preferred over their numeric RustDesk IDs.
 
-          **Retained from preview 4**
-          - Compact mouse icon in the window titlebar; no game-screen overlay.
-          - Proportional mouse-position scaling for different remote resolutions.
+          **Home device list**
+          - Connected remote peers are marked "접속 중" separately from the
+            existing online/reachable indicator, in grid and tile/list views.
+          - Connection badges refresh about once per second.
 
-          Windows x64 unofficial unsigned preview, RustDesk 1.5.3-based.
-          Hardware-codec feature is disabled. Keyboard, wheel, relative-mouse,
-          and touch input are not broadcast. Runtime remote-device testing
-          remains necessary beyond CI compilation.
+          **Retained:** Compact titlebar mouse button and proportional
+          coordinate mapping for different screen resolutions.
 
-          Extract the entire ZIP to a separate folder and run rustdesk.exe.
-          Do not overwrite your existing official RustDesk installation.
+          Windows x64 unofficial unsigned preview based on RustDesk 1.5.3.
+          No hardware-codec feature, keyboard/wheel/relative/touch rebroadcast.
+          Live multi-device testing is still required beyond CI compilation.
+
+          Extract the entire ZIP into a separate folder and run rustdesk.exe.
+          Do not replace the official RustDesk installation.
           EOF
 
       - name: Upload new preview release
@@ -369,7 +383,7 @@ jobs:
           gh release create "$TAG_NAME" "$ASSET_NAME" SHA256SUMS.txt \
             --repo "$GITHUB_REPOSITORY" \
             --target "$GITHUB_SHA" \
-            --title "RustDesk MultiClick Windows x64 — Preview 5 (retained target selection & compact list)" \
+            --title "RustDesk MultiClick Windows x64 — Preview 6 (independent multi-sources & connected badges)" \
             --notes-file RELEASE_NOTES.md \
             --prerelease
 

@@ -24,6 +24,10 @@ enum PeerUiType { grid, tile, list }
 
 final peerCardUiType = PeerUiType.grid.obs;
 
+// True if this RustDesk instance currently controls the remote peer.
+// This is separate from the existing online/reachable indicator.
+final connectedRemotePeerIds = ValueNotifier<Set<String>>(<String>{});
+
 bool? hideUsernameOnCard;
 
 class _PeerCard extends StatefulWidget {
@@ -58,6 +62,32 @@ class _PeerCardState extends State<_PeerCard>
     return Obx(() =>
         stateGlobal.isPortrait.isTrue ? _buildPortrait() : _buildLandscape());
   }
+
+  Widget _activeRemoteBadge(String peerId) =>
+      ValueListenableBuilder<Set<String>>(
+        valueListenable: connectedRemotePeerIds,
+        builder: (context, peers, _) {
+          if (!isWindows || !peers.contains(peerId)) {
+            return const SizedBox.shrink();
+          }
+          return Tooltip(
+            message: '현재 원격 연결 중',
+            child: Container(
+              margin: const EdgeInsets.only(right: 4),
+              padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 2),
+              decoration: BoxDecoration(
+                color: Colors.green.withOpacity(0.14),
+                borderRadius: BorderRadius.circular(4),
+              ),
+              child: const Text('접속 중',
+                  style: TextStyle(
+                      color: Colors.green,
+                      fontSize: 10,
+                      fontWeight: FontWeight.w600)),
+            ),
+          );
+        },
+      );
 
   Widget gestureDetector({required Widget child}) {
     final PeerTabModel peerTabModel = Provider.of(context);
@@ -187,6 +217,7 @@ class _PeerCardState extends State<_PeerCard>
                     children: [
                       Row(children: [
                         getOnline(isPortrait ? 4 : 8, peer.online),
+                        _activeRemoteBadge(peer.id),
                         Expanded(
                             child: Text(
                           peer.alias.isEmpty ? formatID(peer.id) : peer.alias,
@@ -369,6 +400,7 @@ class _PeerCardState extends State<_PeerCard>
                       Expanded(
                           child: Row(children: [
                         getOnline(8, peer.online),
+                        _activeRemoteBadge(peer.id),
                         Expanded(
                             child: Text(
                           peer.alias.isEmpty ? formatID(peer.id) : peer.alias,
