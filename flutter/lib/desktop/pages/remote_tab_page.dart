@@ -613,25 +613,34 @@ class _MouseBroadcastTitleButtonState
     return Obx(() {
       final remote = _selectedRemotePage;
       if (remote == null) return const SizedBox.shrink();
-      final active = remote.isMouseBroadcastSource;
-      return Tooltip(
-        message: active ? '멀티클릭 ON · 클릭하면 OFF' : '멀티클릭 OFF · 대상 선택',
-        child: IconButton(
-          icon: Icon(Icons.mouse,
-              size: 18, color: active ? Colors.red : null),
-          splashRadius: 18,
-          padding: EdgeInsets.zero,
-          constraints: const BoxConstraints(minWidth: 34, minHeight: 28),
-          onPressed: () async {
-            if (active) {
-              // One click disarms, but Rust retains the chosen target IDs.
-              remote.stopMouseBroadcast();
-            } else {
-              await remote.showMouseBroadcastTargetPicker();
-            }
-            if (mounted) setState(() {});
-          },
-        ),
+      return ValueListenableBuilder<bool>(
+        valueListenable: remote.mouseBroadcastActive,
+        builder: (context, observed, child) {
+          // Read native state to avoid an out-of-sync display after a
+          // disconnected session or failed selection.
+          final active = remote.isMouseBroadcastSource;
+          return Tooltip(
+            message: active
+                ? '멀티클릭 ON · 클릭하면 OFF'
+                : '멀티클릭 OFF · 대상 선택',
+            child: IconButton(
+              icon: Icon(Icons.mouse,
+                  size: 18, color: active ? Colors.red : null),
+              splashRadius: 18,
+              padding: EdgeInsets.zero,
+              constraints:
+                  const BoxConstraints(minWidth: 34, minHeight: 28),
+              onPressed: () async {
+                if (active) {
+                  remote.stopMouseBroadcast();
+                } else {
+                  await remote.showMouseBroadcastTargetPicker();
+                }
+                if (mounted) setState(() {});
+              },
+            ),
+          );
+        },
       );
     });
   }

@@ -1717,4 +1717,267 @@ replace_once(peer_tab,
 
   final List<_TabEntry> entries = [""")
 
-print("Patched RustDesk with independent multi-click sources, scrollable picker and active connection badges")
+replace_once(rust,
+    """pub fn main_set_local_option(key: String, value: String) {
+    if let Some(uuid) = key.strip_prefix("mouse-broadcast-source:") {""",
+    """pub fn main_set_local_option(key: String, value: String) {
+    if let Some(uuid) = key.strip_prefix("mouse-broadcast-apply:") {
+        let Ok(source_id) = uuid::Uuid::parse_str(uuid) else {
+            log::warn!("Multi-click apply rejected invalid session UUID: {}", uuid);
+            return;
+        };
+        let Ok((enable, targets)) =
+            serde_json::from_str::<(bool, Vec<String>)>(&value)
+        else {
+            log::warn!("Multi-click apply rejected malformed target payload");
+            return;
+        };
+        let Some(source_session) = sessions::get_session_by_session_id(&source_id) else {
+            log::warn!("Multi-click apply failed: source session no longer exists");
+            return;
+        };
+        if !source_session.is_default() {
+            log::warn!("Multi-click apply rejected non-control source session");
+            return;
+        }
+        let source_peer_id = source_session.lc.read().unwrap().get_id().to_owned();
+        let requested: HashSet<String> = targets.into_iter()
+            .filter(|peer| !peer.trim().is_empty()
+                && peer.len() <= 256
+                && *peer != source_peer_id)
+            .take(512)
+            .collect();
+        let mut configs = MOUSE_BROADCAST_CONFIGS.lock().unwrap();
+        let config = configs.entry(source_id).or_default();
+        config.targets = requested;
+        config.enabled = enable && !config.targets.is_empty();
+        log::info!("Multi-click updated: source={}, enabled={}, targets={}",
+            source_id, config.enabled, config.targets.len());
+        return;
+    }
+    if let Some(uuid) = key.strip_prefix("mouse-broadcast-source:") {""")
+
+replace_once(dart,
+    """  final SimpleWrapper<State<RemotePage>?> _lastState = SimpleWrapper(null);""",
+    """  final SimpleWrapper<State<RemotePage>?> _lastState = SimpleWrapper(null);
+  // Immediate, per-window status updates for the titlebar mouse icon.
+  final ValueNotifier<bool> mouseBroadcastActive = ValueNotifier<bool>(false);""")
+
+replace_once(dart,
+    """  void stopMouseBroadcast() {
+    final state = _lastState.value;
+    if (state is _RemotePageState && state.mounted && isMouseBroadcastSource) {
+      bind.mainSetLocalOption(
+          key: 'mouse-broadcast-source:${state.sessionId}', value: '');
+    }
+  }""",
+    """  void stopMouseBroadcast() {
+    final state = _lastState.value;
+    if (state is _RemotePageState && state.mounted && isMouseBroadcastSource) {
+      bind.mainSetLocalOption(
+          key: 'mouse-broadcast-source:${state.sessionId}', value: '');
+      mouseBroadcastActive.value = isMouseBroadcastSource;
+    }
+  }""")
+
+replace_once(dart,
+    """    final scrollController = ScrollController();
+
+    void togglePeer(String peer, StateSetter update) {""",
+    """    final scrollController = ScrollController();
+
+    void scrollBy(double distance) {
+      if (!scrollController.hasClients) return;
+      final destination = (scrollController.offset + distance)
+          .clamp(0.0, scrollController.position.maxScrollExtent)
+          .toDouble();
+      scrollController.animateTo(
+        destination,
+        duration: const Duration(milliseconds: 180),
+        curve: Curves.easeOut,
+      );
+    }
+
+    void togglePeer(String peer, StateSetter update) {""")
+
+replace_once(dart,
+    """                      height: peers.isEmpty
+                          ? 56
+                          : (peers.length > 7 ? 252.0 : peers.length * 36.0),
+                      child: peers.isEmpty""",
+    """                      // Restrict to four visible rows. A fifth peer always
+                      // creates overflow and a visible scroll bar.
+                      height: peers.isEmpty
+                          ? 56
+                          : (peers.length > 4 ? 144.0 : peers.length * 36.0),
+                      child: peers.isEmpty""")
+
+replace_once(dart,
+    """                          : ScrollConfiguration(
+                              // Desktop Flutter defaults to wheel-only mouse
+                              // scrolling. Also allow press-and-drag on rows.
+                              behavior: const MaterialScrollBehavior().copyWith(
+                                dragDevices: {
+                                  PointerDeviceKind.mouse,
+                                  PointerDeviceKind.touch,
+                                  PointerDeviceKind.stylus,
+                                  PointerDeviceKind.trackpad,
+                                },
+                              ),
+                              child: Scrollbar(
+                                controller: scrollController,
+                                thumbVisibility: peers.length > 7,
+                                trackVisibility: peers.length > 7,
+                                interactive: true,
+                                child: ListView.builder(""",
+    """                          : Row(
+                              children: [
+                                Expanded(
+                                  child: ScrollConfiguration(
+                                    // Mouse wheel + press-drag, including on
+                                    // Windows desktop mouse input.
+                                    behavior: const MaterialScrollBehavior()
+                                        .copyWith(dragDevices: {
+                                      PointerDeviceKind.mouse,
+                                      PointerDeviceKind.touch,
+                                      PointerDeviceKind.stylus,
+                                      PointerDeviceKind.trackpad,
+                                    }),
+                                    child: Scrollbar(
+                                      controller: scrollController,
+                                      thumbVisibility: peers.length > 4,
+                                      trackVisibility: peers.length > 4,
+                                      thickness: 9,
+                                      radius: const Radius.circular(4),
+                                      interactive: true,
+                                      child: ListView.builder(""")
+
+replace_once(dart,
+    """                                  },
+                                ),
+                              ),
+                            ),
+                    ),
+                    const Divider(height: 14, thickness: 1),""",
+    """                                  },
+                                      ),
+                                    ),
+                                  ),
+                                ),
+                                if (peers.length > 4)
+                                  SizedBox(
+                                    width: 28,
+                                    child: Column(
+                                      mainAxisAlignment:
+                                          MainAxisAlignment.spaceBetween,
+                                      children: [
+                                        IconButton(
+                                          icon: const Icon(Icons.keyboard_arrow_up,
+                                              size: 20),
+                                          tooltip: '목록 위로',
+                                          padding: EdgeInsets.zero,
+                                          constraints: const BoxConstraints(
+                                              minWidth: 24, minHeight: 28),
+                                          onPressed: () => scrollBy(-108),
+                                        ),
+                                        IconButton(
+                                          icon: const Icon(Icons.keyboard_arrow_down,
+                                              size: 20),
+                                          tooltip: '목록 아래로',
+                                          padding: EdgeInsets.zero,
+                                          constraints: const BoxConstraints(
+                                              minWidth: 24, minHeight: 28),
+                                          onPressed: () => scrollBy(108),
+                                        ),
+                                      ],
+                                    ),
+                                  ),
+                              ],
+                            ),
+                    ),
+                    const Divider(height: 14, thickness: 1),""")
+
+replace_once(dart,
+    """                  onPressed: () {
+                    final targetList = selected.toList()..sort();
+                    bind.mainSetLocalOption(
+                        key: '$_mouseBroadcastTargetsKey${sessionId.toString()}',
+                        value: jsonEncode(targetList));
+                    bind.mainSetLocalOption(
+                        key: '$_mouseBroadcastKey${sessionId.toString()}',
+                        value: selected.isNotEmpty ? 'Y' : '');
+                    Navigator.of(dialogContext).pop();
+                  },""",
+    """                  onPressed: () {
+                    final targetList = selected.toList()..sort();
+                    // Apply targets and ON/OFF atomically for this session.
+                    bind.mainSetLocalOption(
+                        key: 'mouse-broadcast-apply:${sessionId.toString()}',
+                        value: jsonEncode([selected.isNotEmpty, targetList]));
+                    final enabled = bind.mainGetLocalOption(
+                            key: '$_mouseBroadcastKey${sessionId.toString()}') ==
+                        'Y';
+                    widget.mouseBroadcastActive.value = enabled;
+                    if (selected.isNotEmpty && !enabled) {
+                      ScaffoldMessenger.of(context).showSnackBar(
+                        const SnackBar(content: Text(
+                          '멀티클릭 ON 실패: 원격 연결 상태를 확인하세요.',
+                        )),
+                      );
+                      return;
+                    }
+                    Navigator.of(dialogContext).pop();
+                  },""")
+
+replace_once(remote_tab,
+    """      final active = remote.isMouseBroadcastSource;
+      return Tooltip(
+        message: active ? '멀티클릭 ON · 클릭하면 OFF' : '멀티클릭 OFF · 대상 선택',
+        child: IconButton(
+          icon: Icon(Icons.mouse,
+              size: 18, color: active ? Colors.red : null),
+          splashRadius: 18,
+          padding: EdgeInsets.zero,
+          constraints: const BoxConstraints(minWidth: 34, minHeight: 28),
+          onPressed: () async {
+            if (active) {
+              // One click disarms, but Rust retains the chosen target IDs.
+              remote.stopMouseBroadcast();
+            } else {
+              await remote.showMouseBroadcastTargetPicker();
+            }
+            if (mounted) setState(() {});
+          },
+        ),
+      );""",
+    """      return ValueListenableBuilder<bool>(
+        valueListenable: remote.mouseBroadcastActive,
+        builder: (context, observed, child) {
+          // Read native state to avoid an out-of-sync display after a
+          // disconnected session or failed selection.
+          final active = remote.isMouseBroadcastSource;
+          return Tooltip(
+            message: active
+                ? '멀티클릭 ON · 클릭하면 OFF'
+                : '멀티클릭 OFF · 대상 선택',
+            child: IconButton(
+              icon: Icon(Icons.mouse,
+                  size: 18, color: active ? Colors.red : null),
+              splashRadius: 18,
+              padding: EdgeInsets.zero,
+              constraints:
+                  const BoxConstraints(minWidth: 34, minHeight: 28),
+              onPressed: () async {
+                if (active) {
+                  remote.stopMouseBroadcast();
+                } else {
+                  await remote.showMouseBroadcastTargetPicker();
+                }
+                if (mounted) setState(() {});
+              },
+            ),
+          );
+        },
+      );""")
+
+print("Patched RustDesk with atomic ON activation, immediate titlebar feedback and explicit list scroll controls")

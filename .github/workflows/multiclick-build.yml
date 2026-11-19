@@ -206,7 +206,18 @@ jobs:
                   $picker.Contains('const Divider(height: 14, thickness: 1)'))) {
             throw "Missing scrollable fixed-height picker and bottom divider"
           }
-          Write-Host "Verified per-window broadcasting, self-exclusion, list scrolling, and connected badges."
+          if (!( $core.Contains('mouse-broadcast-apply:') )) {
+            throw "Missing atomic multi-click activation"
+          }
+          if (!( $picker.Contains('scrollBy(108)') -and
+                  $picker.Contains('scrollBy(-108)') -and
+                  $picker.Contains('thumbVisibility: peers.length > 4') )) {
+            throw "Missing visible multi-click scroll controls"
+          }
+          if (!( (Get-Content -Raw -LiteralPath 'flutter/lib/desktop/pages/remote_tab_page.dart').Contains('ValueListenableBuilder<bool>') )) {
+            throw "Missing reactive titlebar ON indicator"
+          }
+          Write-Host "Verified atomic ON activation, titlebar updates and list scrolling."
 
       - name: Install LLVM 15
         uses: KyleMayes/install-llvm-action@v2
@@ -311,7 +322,7 @@ jobs:
       actions: read
     env:
       GH_TOKEN: ${{ github.token }}
-      TAG_NAME: v1.5.3-multiclick-preview.6
+      TAG_NAME: v1.5.3-multiclick-preview.7
       ASSET_NAME: RustDesk-MultiClick-Windows-x64.zip
 
     steps:
@@ -341,35 +352,31 @@ jobs:
         shell: bash
         run: |
           cat > RELEASE_NOTES.md <<'EOF'
-          ## RustDesk MultiClick Windows x64 — preview 6
+          ## RustDesk MultiClick Windows x64 — preview 7
 
-          **Independent multi-click sources**
-          - Each remote window keeps its own target checkbox list and ON/OFF state.
-          - Multiple windows can be ON simultaneously (e.g., 1 and 3).
-          - A window can never select or broadcast back to its own remote device.
-          - Clicking its red ON mouse icon turns only that window OFF.
-            Reopening restores that window's previously selected devices.
+          **ON-after-Apply fix**
+          - The chosen remote IDs and source ON state are now committed
+            together as one native transaction. ON status is checked after Apply.
+          - The titlebar mouse icon updates immediately via a per-window
+            ValueNotifier. If native ON fails, the dialog stays open and
+            displays an error rather than silently ignoring Apply.
 
-          **Improved picker**
-          - A bounded-height list displays a scrollbar when there are many devices.
-          - Scroll with mouse wheel, drag the scrollbar or press-and-drag.
-          - A separator line appears below the device list.
-          - Device aliases remain preferred over their numeric RustDesk IDs.
+          **Visible device-list scroll**
+          - Picker shows at most four compact rows; five or more devices
+            get a visible 9px scroll thumb and scrollbar track.
+          - The list accepts mouse-wheel, press-and-drag, touch and trackpad.
+          - Dedicated up and down arrows permit reliable scrolling even
+            if a remote input driver interferes with drag gestures.
 
-          **Home device list**
-          - Connected remote peers are marked "접속 중" separately from the
-            existing online/reachable indicator, in grid and tile/list views.
-          - Connection badges refresh about once per second.
+          **Retained:** Independent simultaneous multi-click source windows,
+          self-exclusion, saved selections, alias labels, bottom divider,
+          connection status badges, proportional cursor scaling.
 
-          **Retained:** Compact titlebar mouse button and proportional
-          coordinate mapping for different screen resolutions.
+          Windows x64, unofficial unsigned RustDesk 1.5.3-based preview.
+          No keyboard/wheel/relative/touch broadcast; no hwcodec.
+          CI compilation does not establish live multi-device behavior.
 
-          Windows x64 unofficial unsigned preview based on RustDesk 1.5.3.
-          No hardware-codec feature, keyboard/wheel/relative/touch rebroadcast.
-          Live multi-device testing is still required beyond CI compilation.
-
-          Extract the entire ZIP into a separate folder and run rustdesk.exe.
-          Do not replace the official RustDesk installation.
+          Extract the ZIP into a separate folder and run rustdesk.exe.
           EOF
 
       - name: Upload new preview release
@@ -383,7 +390,7 @@ jobs:
           gh release create "$TAG_NAME" "$ASSET_NAME" SHA256SUMS.txt \
             --repo "$GITHUB_REPOSITORY" \
             --target "$GITHUB_SHA" \
-            --title "RustDesk MultiClick Windows x64 — Preview 6 (independent multi-sources & connected badges)" \
+            --title "RustDesk MultiClick Windows x64 — Preview 7 (atomic activation and visible list scroll controls)" \
             --notes-file RELEASE_NOTES.md \
             --prerelease
 

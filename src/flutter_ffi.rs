@@ -1337,6 +1337,40 @@ pub fn main_set_env(key: String, value: Option<String>) -> SyncReturn<()> {
 }
 
 pub fn main_set_local_option(key: String, value: String) {
+    if let Some(uuid) = key.strip_prefix("mouse-broadcast-apply:") {
+        let Ok(source_id) = uuid::Uuid::parse_str(uuid) else {
+            log::warn!("Multi-click apply rejected invalid session UUID: {}", uuid);
+            return;
+        };
+        let Ok((enable, targets)) =
+            serde_json::from_str::<(bool, Vec<String>)>(&value)
+        else {
+            log::warn!("Multi-click apply rejected malformed target payload");
+            return;
+        };
+        let Some(source_session) = sessions::get_session_by_session_id(&source_id) else {
+            log::warn!("Multi-click apply failed: source session no longer exists");
+            return;
+        };
+        if !source_session.is_default() {
+            log::warn!("Multi-click apply rejected non-control source session");
+            return;
+        }
+        let source_peer_id = source_session.lc.read().unwrap().get_id().to_owned();
+        let requested: HashSet<String> = targets.into_iter()
+            .filter(|peer| !peer.trim().is_empty()
+                && peer.len() <= 256
+                && *peer != source_peer_id)
+            .take(512)
+            .collect();
+        let mut configs = MOUSE_BROADCAST_CONFIGS.lock().unwrap();
+        let config = configs.entry(source_id).or_default();
+        config.targets = requested;
+        config.enabled = enable && !config.targets.is_empty();
+        log::info!("Multi-click updated: source={}, enabled={}, targets={}",
+            source_id, config.enabled, config.targets.len());
+        return;
+    }
     if let Some(uuid) = key.strip_prefix("mouse-broadcast-source:") {
         if let Ok(source_id) = uuid::Uuid::parse_str(uuid) {
             let mut configs = MOUSE_BROADCAST_CONFIGS.lock().unwrap();

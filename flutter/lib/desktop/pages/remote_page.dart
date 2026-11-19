@@ -66,6 +66,8 @@ class RemotePage extends StatefulWidget {
   final bool? forceRelay;
   final bool? isSharedPassword;
   final SimpleWrapper<State<RemotePage>?> _lastState = SimpleWrapper(null);
+  // Immediate, per-window status updates for the titlebar mouse icon.
+  final ValueNotifier<bool> mouseBroadcastActive = ValueNotifier<bool>(false);
   final DesktopTabController? tabController;
 
   FFI get ffi => (_lastState.value! as _RemotePageState)._ffi;
@@ -91,6 +93,7 @@ class RemotePage extends StatefulWidget {
     if (state is _RemotePageState && state.mounted && isMouseBroadcastSource) {
       bind.mainSetLocalOption(
           key: 'mouse-broadcast-source:${state.sessionId}', value: '');
+      mouseBroadcastActive.value = isMouseBroadcastSource;
     }
   }
 
@@ -216,6 +219,18 @@ class _RemotePageState extends State<RemotePage>
     final peers = <String>{...connected, ...selected}.toList()..sort();
     final scrollController = ScrollController();
 
+    void scrollBy(double distance) {
+      if (!scrollController.hasClients) return;
+      final destination = (scrollController.offset + distance)
+          .clamp(0.0, scrollController.position.maxScrollExtent)
+          .toDouble();
+      scrollController.animateTo(
+        destination,
+        duration: const Duration(milliseconds: 180),
+        curve: Curves.easeOut,
+      );
+    }
+
     void togglePeer(String peer, StateSetter update) {
       update(() {
         if (!selected.add(peer)) selected.remove(peer);
@@ -288,31 +303,37 @@ class _RemotePageState extends State<RemotePage>
                     ),
                     const Divider(height: 8),
                     SizedBox(
+                      // Restrict to four visible rows. A fifth peer always
+                      // creates overflow and a visible scroll bar.
                       height: peers.isEmpty
                           ? 56
-                          : (peers.length > 7 ? 252.0 : peers.length * 36.0),
+                          : (peers.length > 4 ? 144.0 : peers.length * 36.0),
                       child: peers.isEmpty
                           ? const Padding(
                               padding: EdgeInsets.symmetric(vertical: 18),
                               child: Text('다른 원격 기기를 연결한 뒤 새로고침하세요.'),
                             )
-                          : ScrollConfiguration(
-                              // Desktop Flutter defaults to wheel-only mouse
-                              // scrolling. Also allow press-and-drag on rows.
-                              behavior: const MaterialScrollBehavior().copyWith(
-                                dragDevices: {
-                                  PointerDeviceKind.mouse,
-                                  PointerDeviceKind.touch,
-                                  PointerDeviceKind.stylus,
-                                  PointerDeviceKind.trackpad,
-                                },
-                              ),
-                              child: Scrollbar(
-                                controller: scrollController,
-                                thumbVisibility: peers.length > 7,
-                                trackVisibility: peers.length > 7,
-                                interactive: true,
-                                child: ListView.builder(
+                          : Row(
+                              children: [
+                                Expanded(
+                                  child: ScrollConfiguration(
+                                    // Mouse wheel + press-drag, including on
+                                    // Windows desktop mouse input.
+                                    behavior: const MaterialScrollBehavior()
+                                        .copyWith(dragDevices: {
+                                      PointerDeviceKind.mouse,
+                                      PointerDeviceKind.touch,
+                                      PointerDeviceKind.stylus,
+                                      PointerDeviceKind.trackpad,
+                                    }),
+                                    child: Scrollbar(
+                                      controller: scrollController,
+                                      thumbVisibility: peers.length > 4,
+                                      trackVisibility: peers.length > 4,
+                                      thickness: 9,
+                                      radius: const Radius.circular(4),
+                                      interactive: true,
+                                      child: ListView.builder(
                                   controller: scrollController,
                                   primary: false,
                                   shrinkWrap: false,
@@ -401,8 +422,39 @@ class _RemotePageState extends State<RemotePage>
                                       ),
                                     );
                                   },
+                                      ),
+                                    ),
+                                  ),
                                 ),
-                              ),
+                                if (peers.length > 4)
+                                  SizedBox(
+                                    width: 28,
+                                    child: Column(
+                                      mainAxisAlignment:
+                                          MainAxisAlignment.spaceBetween,
+                                      children: [
+                                        IconButton(
+                                          icon: const Icon(Icons.keyboard_arrow_up,
+                                              size: 20),
+                                          tooltip: '목록 위로',
+                                          padding: EdgeInsets.zero,
+                                          constraints: const BoxConstraints(
+                                              minWidth: 24, minHeight: 28),
+                                          onPressed: () => scrollBy(-108),
+                                        ),
+                                        IconButton(
+                                          icon: const Icon(Icons.keyboard_arrow_down,
+                                              size: 20),
+                                          tooltip: '목록 아래로',
+                                          padding: EdgeInsets.zero,
+                                          constraints: const BoxConstraints(
+                                              minWidth: 24, minHeight: 28),
+                                          onPressed: () => scrollBy(108),
+                                        ),
+                                      ],
+                                    ),
+                                  ),
+                              ],
                             ),
                     ),
                     const Divider(height: 14, thickness: 1),
@@ -417,12 +469,22 @@ class _RemotePageState extends State<RemotePage>
                 FilledButton(
                   onPressed: () {
                     final targetList = selected.toList()..sort();
+                    // Apply targets and ON/OFF atomically for this session.
                     bind.mainSetLocalOption(
-                        key: '$_mouseBroadcastTargetsKey${sessionId.toString()}',
-                        value: jsonEncode(targetList));
-                    bind.mainSetLocalOption(
-                        key: '$_mouseBroadcastKey${sessionId.toString()}',
-                        value: selected.isNotEmpty ? 'Y' : '');
+                        key: 'mouse-broadcast-apply:${sessionId.toString()}',
+                        value: jsonEncode([selected.isNotEmpty, targetList]));
+                    final enabled = bind.mainGetLocalOption(
+                            key: '$_mouseBroadcastKey${sessionId.toString()}') ==
+                        'Y';
+                    widget.mouseBroadcastActive.value = enabled;
+                    if (selected.isNotEmpty && !enabled) {
+                      ScaffoldMessenger.of(context).showSnackBar(
+                        const SnackBar(content: Text(
+                          '멀티클릭 ON 실패: 원격 연결 상태를 확인하세요.',
+                        )),
+                      );
+                      return;
+                    }
                     Navigator.of(dialogContext).pop();
                   },
                   child: Text(selected.isEmpty
